@@ -5,7 +5,7 @@
   const PAGE_SIZE = 100;
 
   const state = {
-    filter: { kind: 'all', dir: null, recursive: true }, // kind: all | favorite | missing
+    filter: { kind: 'all', dir: null, recursive: true, lora: null }, // kind: all | favorite | missing
     cursor: null,
     done: false,
     loading: false,
@@ -40,6 +40,7 @@
     if (f.kind === 'favorite') p.favorite_only = true;
     if (f.kind === 'missing') p.missing_only = true;
     if (f.dir !== null) { p.dir = f.dir; p.recursive = f.recursive; }
+    if (f.lora !== null) p.lora = f.lora;
     return p;
   }
 
@@ -124,12 +125,19 @@
       badge.textContent = 'missing';
       cell.appendChild(badge);
     }
-    if (item.isFavorite) {
-      const fav = document.createElement('span');
-      fav.className = 'fav';
-      fav.textContent = '★';
-      cell.appendChild(fav);
-    }
+    // Favorite toggle at the top-right of every cell.
+    const fav = document.createElement('button');
+    fav.type = 'button';
+    fav.className = 'fav' + (item.isFavorite ? ' on' : '');
+    fav.textContent = item.isFavorite ? '★' : '☆';
+    fav.title = 'お気に入り';
+    fav.setAttribute('aria-pressed', String(item.isFavorite));
+    fav.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const current = state.items.find((i) => i.id === item.id);
+      setFavorite(item.id, !(current ? current.isFavorite : item.isFavorite));
+    });
+    cell.appendChild(fav);
     cell.addEventListener('click', () => selectImage(item.id));
     return cell;
   }
@@ -194,24 +202,86 @@
 
   function selectFixed(kind) {
     filterLabel.textContent = { all: 'すべて', favorite: 'お気に入り', missing: '見つからない' }[kind];
-    setFilter({ kind, dir: null });
+    setFilter({ kind, dir: null, lora: null });
     highlightSelection();
   }
 
   function selectFolder(dir) {
     filterLabel.textContent = dir;
-    setFilter({ kind: 'all', dir, recursive: recursiveBox.checked });
+    setFilter({ kind: 'all', dir, recursive: recursiveBox.checked, lora: null });
     highlightSelection();
   }
 
   function highlightSelection() {
     const f = state.filter;
     for (const el of document.querySelectorAll('#left .item')) {
-      const isFixed = el.dataset.kind !== undefined;
-      const on = f.dir === null ? (isFixed && el.dataset.kind === f.kind) : (!isFixed && el.dataset.dir === f.dir);
+      let on = false;
+      if (el.dataset.lora !== undefined) on = f.lora !== null && Number(el.dataset.lora) === f.lora;
+      else if (el.dataset.dir !== undefined) on = f.lora === null && f.dir === el.dataset.dir;
+      else if (el.dataset.kind !== undefined) on = f.lora === null && f.dir === null && el.dataset.kind === f.kind;
       el.classList.toggle('selected', on);
     }
   }
+
+  // --- LoRA list (FR-41) -------------------------------------------------------
+  const loraList = $('#lora-list');
+  const loraScanBtn = $('#lora-scan-btn');
+  const loraScanResult = $('#lora-scan-result');
+  let loras = [];
+
+  async function refreshLoras() {
+    try {
+      const body = await apiGet('/loras');
+      loras = body.items;
+      loraList.replaceChildren(...loras.map(renderLoraItem));
+      if (!loras.length) loraList.appendChild(el('li', { class: 'muted' }, '登録なし'));
+      highlightSelection();
+    } catch (err) {
+      statusEl.textContent = `LoRA 取得エラー: ${err.message}`;
+    }
+  }
+
+  function renderLoraItem(lora) {
+    const li = document.createElement('li');
+    const row = el('div', { class: 'item', title: lora.name });
+    row.dataset.lora = String(lora.id);
+    row.appendChild(el('span', { class: 'label' }, lora.name));
+    if (lora.presence !== 'active') row.appendChild(el('span', { class: `presence ${lora.presence}` }, lora.presence));
+    row.appendChild(el('span', { class: 'count' }, String(lora.imageCount)));
+    row.addEventListener('click', () => selectLora(lora.id));
+    li.appendChild(row);
+    return li;
+  }
+
+  /** Filter the grid to images using this LoRA and open its editor in the right pane. */
+  function selectLora(id) {
+    const lora = loras.find((l) => l.id === id);
+    filterLabel.textContent = `LoRA: ${lora ? lora.name : id}`;
+    setFilter({ kind: 'all', dir: null, lora: id });
+    highlightSelection();
+    openLoraEditor(id);
+  }
+
+  loraScanBtn.addEventListener('click', async () => {
+    loraScanBtn.disabled = true;
+    loraScanResult.textContent = 'スキャン中…';
+    try {
+      const res = await fetch('/loras/scan', { method: 'POST' });
+      const body = await res.json();
+      if (!res.ok) throw new Error(`${body.error.code}: ${body.error.message}`);
+      loraScanResult.textContent =
+        (body.loraRootConfigured
+          ? `ファイル ${body.scannedFileCount} / 新規 ${body.fileCreatedCount} / missing ${body.fileMissingCount}\n`
+          : 'lora_root 未設定（ワークフローからのみ登録）\n') +
+        `画像との関連付け ${body.backfilledImageCount} 件`;
+      await refreshLoras();
+      if (state.filter.lora !== null) resetAndLoad();
+    } catch (err) {
+      loraScanResult.textContent = `エラー: ${err.message}`;
+    } finally {
+      loraScanBtn.disabled = false;
+    }
+  });
 
   fixedItems.addEventListener('click', (ev) => {
     const li = ev.target.closest('.item');
@@ -347,9 +417,98 @@
 
     frag.appendChild(promptBlock('Positive', g.positivePrompt, 'positive'));
     frag.appendChild(promptBlock('Negative', g.negativePrompt, 'negative'));
+
+    if (d.loras && d.loras.length) {
+      frag.appendChild(el('h2', {}, 'LoRA'));
+      const ul = el('ul', { class: 'lora-usage' });
+      for (const u of d.loras) {
+        const name = el('span', { class: 'lora-name', title: 'この LoRA の画像を表示', onclick: () => selectLora(u.id) }, u.name);
+        const strength = el('span', { class: 'strength' },
+          `model ${u.strengthModel === null ? '?' : u.strengthModel} / clip ${u.strengthClip === null ? '?' : u.strengthClip}`);
+        const li = el('li', {}, name, strength);
+        if (u.presence !== 'active') li.appendChild(el('span', { class: `presence ${u.presence}` }, u.presence));
+        if (u.triggerWords) {
+          const copyBtn = el('button', { type: 'button', class: 'copy-btn', style: 'float:right' }, 'コピー');
+          copyBtn.addEventListener('click', () => copyText(u.triggerWords));
+          li.appendChild(el('div', { class: 'trigger' }, copyBtn, u.triggerWords));
+        }
+        ul.appendChild(li);
+      }
+      frag.appendChild(ul);
+    }
+
     if (d.extractionStatus === 'full') {
       frag.appendChild(el('div', {}, el('a', { href: `/images/${d.id}/raw-metadata`, target: '_blank' }, '生メタデータを開く')));
     }
+    detailEl.replaceChildren(frag);
+  }
+
+  // --- LoRA editor (right pane) ----------------------------------------------
+  async function openLoraEditor(id) {
+    state.selectedId = null;
+    for (const c of grid.querySelectorAll('.cell.selected')) c.classList.remove('selected');
+    detailEl.classList.remove('placeholder');
+    detailEl.textContent = '読み込み中…';
+    try {
+      const lora = await apiGet(`/loras/${id}`);
+      renderLoraEditor(lora);
+    } catch (err) {
+      detailEl.textContent = `エラー: ${err.message}`;
+    }
+  }
+
+  function renderLoraEditor(lora) {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(el('div', { class: 'detail-head' }, el('span', { class: 'name', title: lora.name }, lora.name)));
+    frag.appendChild(el('h2', {}, 'LoRA ファイル'));
+    frag.appendChild(kvTable([
+      ['名前', lora.name],
+      ['ファイル名', lora.fileName],
+      ['サイズ', lora.fileSize === null ? fmtValue(null) : fmtBytes(lora.fileSize)],
+      ['更新日時', lora.fileMtime === null ? fmtValue(null) : lora.fileMtime],
+      ['状態', lora.presence],
+      ['使用画像', `${lora.imageCount} 件`],
+    ]));
+    if (lora.presence === 'unknown') {
+      frag.appendChild(el('div', { class: 'notice' }, 'ワークフローから検出された LoRA です。lora_root を設定して「LoRA スキャン」を実行するとファイル情報が入ります。'));
+    }
+
+    const editor = el('div', { class: 'lora-editor' });
+    const trigger = el('textarea', { id: 'lora-trigger', placeholder: 'Trigger Words' });
+    trigger.value = lora.triggerWords;
+    const memo = el('textarea', { id: 'lora-memo', placeholder: 'メモ' });
+    memo.value = lora.memo;
+    const saved = el('span', { class: 'saved' });
+    const saveBtn = el('button', { type: 'button', id: 'lora-save' }, '保存');
+    const copyBtn = el('button', { type: 'button', id: 'lora-copy-trigger' }, 'Trigger Words をコピー');
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      try {
+        const res = await fetch(`/loras/${lora.id}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trigger_words: trigger.value, memo: memo.value }),
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(`${body.error.code}: ${body.error.message}`);
+        saved.textContent = '保存しました';
+        setTimeout(() => { saved.textContent = ''; }, 1500);
+      } catch (err) {
+        saved.textContent = `エラー: ${err.message}`;
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+    copyBtn.addEventListener('click', async () => {
+      const ok = await copyText(trigger.value);
+      saved.textContent = ok ? 'コピーしました' : 'コピーできませんでした';
+      setTimeout(() => { saved.textContent = ''; }, 1500);
+    });
+    editor.append(
+      el('label', { for: 'lora-trigger' }, 'Trigger Words'), trigger,
+      el('label', { for: 'lora-memo' }, 'メモ'), memo,
+      el('div', { class: 'actions' }, saveBtn, copyBtn, saved),
+    );
+    frag.appendChild(editor);
     detailEl.replaceChildren(frag);
   }
 
@@ -392,19 +551,25 @@
     }
   }
 
-  async function toggleFavorite(d) {
-    const next = !d.isFavorite;
+  function toggleFavorite(d) {
+    return setFavorite(d.id, !d.isFavorite);
+  }
+
+  /** PUT the new favorite state, then sync the grid cell, the detail pane and the counts. */
+  async function setFavorite(id, next) {
     try {
-      const res = await fetch(`/images/${d.id}/favorite`, {
+      const res = await fetch(`/images/${id}/favorite`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ is_favorite: next }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(`${body.error.code}: ${body.error.message}`);
-      d.isFavorite = body.isFavorite;
-      const item = state.items.find((i) => i.id === d.id);
+      const item = state.items.find((i) => i.id === id);
       if (item) item.isFavorite = body.isFavorite;
-      updateCellFavorite(d.id, body.isFavorite);
-      if (state.selectedId === d.id) renderDetail(d);
+      updateCellFavorite(id, body.isFavorite);
+      if (currentDetail && currentDetail.id === id) {
+        currentDetail.isFavorite = body.isFavorite;
+        if (state.selectedId === id) renderDetail(currentDetail);
+      }
       refreshFolders();
     } catch (err) {
       statusEl.textContent = `お気に入り更新エラー: ${err.message}`;
@@ -420,15 +585,11 @@
       if (state.totalCount !== null) { state.totalCount -= 1; totalEl.textContent = `${state.totalCount} 件`; }
       return;
     }
-    const existing = cell.querySelector('.fav');
-    if (on && !existing) {
-      const fav = document.createElement('span');
-      fav.className = 'fav';
-      fav.textContent = '★';
-      cell.appendChild(fav);
-    } else if (!on && existing) {
-      existing.remove();
-    }
+    const fav = cell.querySelector('.fav');
+    if (!fav) return;
+    fav.classList.toggle('on', on);
+    fav.textContent = on ? '★' : '☆';
+    fav.setAttribute('aria-pressed', String(on));
   }
 
   // --- cell size slider (FR-39) ---------------------------------------------
@@ -457,9 +618,10 @@
     applyCellSize(initial);
   }
 
-  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize, refreshFolders, selectFolder, selectFixed, getDetail: () => currentDetail };
+  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize, refreshFolders, refreshLoras, selectFolder, selectFixed, selectLora, getDetail: () => currentDetail };
 
   initCellSize();
   refreshFolders();
+  refreshLoras();
   resetAndLoad();
 })();

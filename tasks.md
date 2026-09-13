@@ -500,6 +500,54 @@
 
 ---
 
+## 追加要望（PR #1 作成後）
+
+### TASK-23
+
+- ID: TASK-23
+- 目的: スキャン時に元画像を `YYYYMMDDTHHMMSS_<uuid4 先頭8桁>.png` へ自動リネームする（FR-40）
+- 対象ファイル:
+  - 変更: `app/config.py`（`rename_on_scan`）, `config.toml`
+  - 変更: `app/db.py`（`scan_runs.renamed_count` と既存 DB への列追加）, `app/models.py`, `app/repository.py`
+  - 変更: `app/scanner.py`（`is_canonical_name` / `rename_to_canonical`、ハッシュ算出前のリネーム）
+  - 変更: `app/api.py`（`renamedCount`）
+  - 変更: `requirements.md`（FR-40 / AC-28、Out of Scope / NFR-2 / AC-19 の改訂）, `design.md`
+  - 新規: `tests/test_scanner_rename.py`, `tests/test_db_migration.py`
+- 完了条件:
+  - 命名規則に合わないファイルが同一フォルダ内でリネームされ、内容ハッシュ・更新日時が不変（AC-28）
+  - 登録済み画像のリネームでレコードが増えず、パス更新とお気に入り維持（AC-28）
+  - 再スキャンで `renamedCount` が 0（AC-28）
+  - `rename_on_scan = false` でリネームしない。リネーム失敗時もスキャンが完了する
+  - 既存の DB に `renamed_count` 列が自動追加される
+  - 検証: `pytest tests/test_scanner_rename.py tests/test_db_migration.py`
+- 関連: FR-6, FR-40 / AC-28
+
+### TASK-24
+
+- ID: TASK-24
+- 目的: LoRA のデータモデルと、ワークフローからの LoRA 使用の記録（FR-42）
+- 対象ファイル: `app/db.py`（`loras` / `image_loras`）, `app/models.py`, `app/comfy_metadata.py`（`extract_loras`）, `app/repository.py`, `app/scanner.py`, `app/api.py`（`GET /images/{id}` の `loras`、`GET /images?lora=`）, `tests/test_loras_model.py`
+- 完了条件: LoraLoader 系ノードの `lora_name` / strength が画像に関連付き、詳細と絞り込みで取得できる。`\` 区切りは `/` に正規化。画像削除で関連が消え LoRA 行は残る
+- 関連: FR-42, FR-44 / AC-29（抽出部分）
+
+### TASK-25
+
+- ID: TASK-25
+- 目的: LoRA フォルダのスキャン、バックフィル、Trigger Words / メモの API（FR-41 / FR-43）
+- 対象ファイル: `app/config.py`（`lora_root`）, `app/lora_scanner.py`, `app/api.py`（`GET /loras`, `POST /loras/scan`, `GET /loras/{id}`, `PUT /loras/{id}`, `GET /config` の `loraRootConfigured`）, `tests/test_api_loras.py`
+- 完了条件: ファイル由来と workflow 由来の LoRA が名前で統合される。削除で missing。`lora_root` 未設定でもバックフィルのみ動く。メモが再スキャンで保持される（AC-29 / AC-30）
+- 関連: FR-41, FR-42, FR-43 / AC-29, AC-30
+
+### TASK-26
+
+- ID: TASK-26
+- 目的: LoRA の UI（左ペイン一覧・スキャンボタン、右ペインのエディタ、画像詳細の使用 LoRA）
+- 対象ファイル: `app/static/index.html`, `app/static/app.js`
+- 完了条件（Playwright で確認済み）: LoRA 選択で一覧が絞り込まれエディタが開く。保存が API に反映され Trigger Words のコピーが一致する。画像詳細に使用 LoRA と Trigger Words が出て、名前からエディタへ戻れる。固定項目やフォルダの選択で LoRA 絞り込みが解除される
+- 関連: FR-43, FR-44 / AC-30（UI 側確認）
+
+---
+
 ## AC 対応表
 
 | AC | 内容（要約） | 完了条件を持つタスク |
@@ -531,6 +579,9 @@
 | AC-25 | サブフォルダ含む / 含まない絞り込み | TASK-18 |
 | AC-26 | 逐次取得で重複なし・総件数一致 | TASK-6, TASK-19（UI） |
 | AC-27 | 最大表示でも実解像度を超えない | TASK-20 |
+| AC-28 | スキャン時の自動リネーム | TASK-23 |
+| AC-29 | LoRA ファイルと workflow 由来 LoRA の統合・使用件数・missing | TASK-24, TASK-25 |
+| AC-30 | Trigger Words / メモの保存と LoRA 絞り込み | TASK-25, TASK-26 |
 
 ---
 
