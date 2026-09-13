@@ -5,7 +5,7 @@
   const PAGE_SIZE = 100;
 
   const state = {
-    filter: { kind: 'all', dir: null, recursive: true, lora: null }, // kind: all | favorite | missing
+    filter: { kind: 'all', dir: null, recursive: true, lora: null, tags: [], tagMatch: 'and' }, // kind: all | favorite | missing
     cursor: null,
     done: false,
     loading: false,
@@ -25,7 +25,9 @@
     const url = new URL(path, window.location.origin);
     if (params) {
       for (const [k, v] of Object.entries(params)) {
-        if (v !== null && v !== undefined) url.searchParams.set(k, String(v));
+        if (v === null || v === undefined) continue;
+        if (Array.isArray(v)) v.forEach((x) => url.searchParams.append(k, String(x)));
+        else url.searchParams.set(k, String(v));
       }
     }
     const res = await fetch(url);
@@ -41,6 +43,7 @@
     if (f.kind === 'missing') p.missing_only = true;
     if (f.dir !== null) { p.dir = f.dir; p.recursive = f.recursive; }
     if (f.lora !== null) p.lora = f.lora;
+    if (f.tags.length) { p.tag = f.tags; p.tag_match = f.tagMatch; }
     return p;
   }
 
@@ -216,7 +219,8 @@
     const f = state.filter;
     for (const el of document.querySelectorAll('#left .item')) {
       let on = false;
-      if (el.dataset.lora !== undefined) on = f.lora !== null && Number(el.dataset.lora) === f.lora;
+      if (el.dataset.tag !== undefined) on = f.tags.includes(Number(el.dataset.tag));
+      else if (el.dataset.lora !== undefined) on = f.lora !== null && Number(el.dataset.lora) === f.lora;
       else if (el.dataset.dir !== undefined) on = f.lora === null && f.dir === el.dataset.dir;
       else if (el.dataset.kind !== undefined) on = f.lora === null && f.dir === null && el.dataset.kind === f.kind;
       el.classList.toggle('selected', on);
@@ -304,6 +308,7 @@
         `missing ${body.missingCount} / 抽出失敗 ${body.extractFailedCount}\n` +
         `サムネイル生成 ${body.thumbnailGeneratedCount} / 失敗 ${body.thumbnailFailedCount}`;
       await refreshFolders();
+      await refreshUsedTags();
       resetAndLoad();
     } catch (err) {
       scanResult.textContent = `エラー: ${err.message}`;
@@ -416,6 +421,10 @@
     ]));
 
     frag.appendChild(promptBlock('Positive', g.positivePrompt, 'positive'));
+    if (d.promptTokens && d.promptTokens.length) {
+      frag.appendChild(el('h2', {}, 'タグ'));
+      frag.appendChild(renderPromptTokens(d.promptTokens));
+    }
     frag.appendChild(promptBlock('Negative', g.negativePrompt, 'negative'));
 
     if (d.loras && d.loras.length) {
@@ -492,6 +501,7 @@
         if (!res.ok) throw new Error(`${body.error.code}: ${body.error.message}`);
         saved.textContent = '保存しました';
         setTimeout(() => { saved.textContent = ''; }, 1500);
+        refreshUsedTags(); // trigger words may have become dictionary tags (FR-49)
       } catch (err) {
         saved.textContent = `エラー: ${err.message}`;
       } finally {
@@ -592,6 +602,167 @@
     fav.setAttribute('aria-pressed', String(on));
   }
 
+  // --- tag dictionary (FR-45 .. FR-52) ----------------------------------------
+  const TAG_COLORS = {
+    general: '#6aa9ff', artist: '#ff7b7b', copyright: '#c58bff', character: '#7fd48a', meta: '#ffb45c', lora: '#ffcc33',
+  };
+  const tagCache = new Map(); // id -> tag json (for chips)
+  const tagUsedEl = $('#tag-used');
+  const tagSearchEl = $('#tag-search');
+  const tagResultsEl = $('#tag-search-results');
+  const tagBar = $('#tag-bar');
+  const tagChips = $('#tag-chips');
+  const tagMatchSel = $('#tag-match');
+  const tagImportBtn = $('#tag-import-btn');
+  const tagCsvInput = $('#tag-csv');
+  const tagImportResult = $('#tag-import-result');
+
+  function tagColor(tag) {
+    return TAG_COLORS[tag && tag.categoryName] || '#888';
+  }
+
+  function fmtCount(n) {
+    return n >= 1000000 ? `${(n / 1000000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
+  }
+
+  function renderTagRow(tag, countText) {
+    const li = document.createElement('li');
+    const row = el('div', { class: 'item', title: `${tag.name}${tag.otherNames ? '\n' + tag.otherNames : ''}` });
+    row.dataset.tag = String(tag.id);
+    row.style.setProperty('--tagc', tagColor(tag));
+    row.append(
+      el('span', { class: 'tag-dot' }),
+      el('span', { class: 'label' }, tag.name),
+      el('span', { class: 'post' }, tag.categoryName),
+      el('span', { class: 'count' }, countText),
+    );
+    row.addEventListener('click', () => toggleTag(tag));
+    li.appendChild(row);
+    return li;
+  }
+
+  async function refreshUsedTags() {
+    try {
+      const body = await apiGet('/tags/used', { limit: 300 });
+      for (const t of body.items) tagCache.set(t.id, t);
+      tagUsedEl.replaceChildren(...body.items.map((t) => renderTagRow(t, String(t.imageCount))));
+      if (!body.items.length) tagUsedEl.appendChild(el('li', { class: 'muted' }, '辞書に一致する語を持つ画像がありません'));
+      highlightSelection();
+    } catch (err) {
+      statusEl.textContent = `タグ取得エラー: ${err.message}`;
+    }
+  }
+
+  /** Add or remove a tag from the filter (FR-50); other filters stay as they are. */
+  function toggleTag(tag) {
+    tagCache.set(tag.id, tag);
+    const tags = state.filter.tags.slice();
+    const i = tags.indexOf(tag.id);
+    if (i >= 0) tags.splice(i, 1); else tags.push(tag.id);
+    setFilter({ tags });
+    renderTagBar();
+    highlightSelection();
+  }
+
+  function clearTags() {
+    setFilter({ tags: [] });
+    renderTagBar();
+    highlightSelection();
+  }
+
+  function renderTagBar() {
+    const tags = state.filter.tags;
+    tagBar.hidden = tags.length === 0;
+    tagChips.replaceChildren(...tags.map((id) => {
+      const tag = tagCache.get(id) || { id, name: `#${id}`, categoryName: '' };
+      const chip = el('span', { class: 'chip' }, tag.name);
+      chip.style.setProperty('--tagc', tagColor(tag));
+      const x = el('span', { class: 'x', title: '外す' }, '✕');
+      x.addEventListener('click', () => toggleTag(tag));
+      chip.appendChild(x);
+      return chip;
+    }));
+    tagMatchSel.value = state.filter.tagMatch;
+  }
+
+  tagMatchSel.addEventListener('change', () => {
+    setFilter({ tagMatch: tagMatchSel.value });
+  });
+  $('#tag-clear').addEventListener('click', clearTags);
+
+  let searchTimer = null;
+  tagSearchEl.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(searchTags, 250);
+  });
+
+  async function searchTags() {
+    const q = tagSearchEl.value.trim();
+    if (!q) { tagResultsEl.replaceChildren(); return; }
+    try {
+      const body = await apiGet('/tags/search', { q, limit: 30 });
+      for (const t of body.items) tagCache.set(t.id, t);
+      tagResultsEl.replaceChildren(...body.items.map((t) => renderTagRow(t, fmtCount(t.postCount))));
+      if (!body.items.length) tagResultsEl.appendChild(el('li', { class: 'muted' }, '該当なし'));
+      highlightSelection();
+    } catch (err) {
+      tagResultsEl.replaceChildren(el('li', { class: 'muted' }, `エラー: ${err.message}`));
+    }
+  }
+
+  tagImportBtn.addEventListener('click', () => tagCsvInput.click());
+  tagCsvInput.addEventListener('change', async () => {
+    const file = tagCsvInput.files[0];
+    if (!file) return;
+    tagImportBtn.disabled = true;
+    tagImportResult.textContent = `取り込み中… (${file.name})`;
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch('/tags/import', { method: 'POST', body: form });
+      const body = await res.json();
+      if (!res.ok) throw new Error(`${body.error.code}: ${body.error.message}`);
+      tagImportResult.textContent =
+        `読み取り ${body.readCount} / 取り込み ${body.importedCount} / 飛ばした行 ${body.skippedCount}\n` +
+        `別名 ${body.aliasCount} / 関連付いた画像 ${body.linkedImageCount}`;
+      await refreshUsedTags();
+      if (state.filter.tags.length) resetAndLoad();
+      if (state.selectedId !== null) loadDetail(state.selectedId);
+    } catch (err) {
+      tagImportResult.textContent = `エラー: ${err.message}`;
+    } finally {
+      tagImportBtn.disabled = false;
+      tagCsvInput.value = '';
+    }
+  });
+
+  /** Chips for the positive prompt words in the detail pane (FR-52). */
+  function renderPromptTokens(tokens) {
+    const wrap = el('div', { class: 'tokens' });
+    for (const { token, tag } of tokens) {
+      if (!tag) {
+        wrap.appendChild(el('span', { class: 'chip unknown', title: '辞書に無い語' }, token));
+        continue;
+      }
+      tagCache.set(tag.id, tag);
+      const chip = el('span', { class: 'chip clickable' + (state.filter.tags.includes(tag.id) ? ' on' : ''), title: `${tag.name} [${tag.categoryName}]` });
+      chip.style.setProperty('--tagc', tagColor(tag));
+      chip.append(el('span', {}, token));
+      const sub = [tag.categoryName];
+      if (tag.postCount) sub.push(fmtCount(tag.postCount));
+      if (tag.otherNames) sub.push(tag.otherNames.split(',')[0].trim());
+      chip.appendChild(el('span', { class: 'sub' }, sub.join(' · ')));
+      chip.addEventListener('click', () => toggleTag(tag));
+      if (tag.source === 'lora' && tag.loraId !== null) {
+        const link = el('a', { href: '#', title: '登録元の LoRA' }, 'LoRA');
+        link.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); selectLora(tag.loraId); });
+        chip.appendChild(link);
+      }
+      wrap.appendChild(chip);
+    }
+    return wrap;
+  }
+
   // --- cell size slider (FR-39) ---------------------------------------------
   const slider = $('#cell-slider');
   const cellValue = $('#cell-value');
@@ -618,10 +789,11 @@
     applyCellSize(initial);
   }
 
-  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize, refreshFolders, refreshLoras, selectFolder, selectFixed, selectLora, getDetail: () => currentDetail };
+  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize, refreshFolders, refreshLoras, refreshUsedTags, selectFolder, selectFixed, selectLora, toggleTag, clearTags, getDetail: () => currentDetail };
 
   initCellSize();
   refreshFolders();
   refreshLoras();
+  refreshUsedTags();
   resetAndLoad();
 })();
