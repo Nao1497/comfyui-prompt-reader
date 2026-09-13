@@ -556,3 +556,30 @@
 16. **`prompt` チャンクが不在で `workflow` のみ存在する場合、および `prompt` が JSON としてパース不能な場合の `extraction_status`。** design §4 の定義（`none` はいずれも存在しない場合のみ）からは `partial` と読めるが、明示されていない。→ TASK-12
 17. **`GET /folders` の兄弟ノードの並び順が未記載**（名前昇順か、件数順か）。→ TASK-17
 18. **`file_mtime` の精度**（秒か、サブ秒を含めるか）。カーソル比較と AC-10 の同一秒内の順序に影響する。design §7 の例は秒精度。→ TASK-3, TASK-6
+
+---
+
+## 採用した解釈（確認事項への暫定回答）
+
+利用者の指示「回答がない項目は design.md から最も素直に読める解釈を採用し、採用内容を明記して進める」に基づく暫定決定。正式な回答があれば差し替える。各項目はコード側にも `# 確認事項 #n` のコメントで印を付ける。
+
+| # | 採用した解釈 |
+|---|---|
+| 1 | 既定値 768px（FR-26 / design §1）を採用する。AC-17 / AC-18 の 512 は旧値とみなし、テストは `thumbnail_max_edge` の設定値を基準に検証する。 |
+| 2 | design.md 冒頭の前提行は更新漏れとみなし、FR-39 / AC-27 まで対象とする。 |
+| 3 | `extract_failed_count` = 今回のスキャンで新規登録した画像のうち `extraction_status='partial'` の件数（メタデータはあるが全項目を取得できなかったもの）。`none` は失敗に含めない。Pillow で開けないファイルはサムネイル失敗（`thumbnail_failed_count`）として数える。 |
+| 4 | `updated_count` = パス不一致で更新したレコード数（missing → active の復帰は含めない）。`missing_count` = 今回のスキャンで新たに `missing` になったレコード数。 |
+| 5 | パス不一致時は `dir_path` も更新する。`thumbnail_status='failed'` の再試行はパス一致・不一致どちらでも行う。 |
+| 6 | 同一スキャン内で同一ハッシュが複数パスに現れた場合、走査順（パスのソート順）で最初のものを採用し、以降は走査件数にのみ数えて無視する。 |
+| 7 | 破損 PNG もレコードを登録する。`image_width` / `image_height` は NULL、`extraction_status='none'`、`thumbnail_status='failed'`。`scanned_count` / `created_count` に含める。ハッシュ算出自体ができない（読み取り不可）ファイルは走査件数に数えて登録しない。 |
+| 8 | `dir` 未指定 → フォルダ条件なし。`dir=''` かつ `recursive=false` → `dir_path = ''`（ルート直下のみ）。`dir=''` かつ `recursive=true` → 条件なし（ルート配下すべて）。 |
+| 9 | `VALIDATION_ERROR` は 422。`limit` は 1〜300 の範囲外、復号不能な `cursor` はいずれも 422 `VALIDATION_ERROR`。 |
+| 10 | (a) `GET /images` に `missing_only`（既定 false、`presence='missing'` のみ）を追加する。(b) `GET /folders` の応答に `favoriteCount`（active かつお気に入り）と `missingCount` を追加する。(c) フォルダノードには `totalCount` を表示する。(d) 左ペインに「サブフォルダを含む」チェックボックス（既定 on）を置く。 |
+| 11 | `GET /config` を追加し `{"gridMinCell", "gridMaxCell", "thumbnailMaxEdge"}` を返す。 |
+| 12 | 左ペイン上部にスキャン実行ボタン（`POST /scan` を呼び結果件数を表示）、右ペインにお気に入り切り替えボタンを置く。 |
+| 13 | 応答は `{"prompt": ..., "workflow": ...}`。存在しない側は `null`。JSON としてパースできない場合はその原文文字列をそのまま値にする。 |
+| 14 | `StaticFiles(html=True)` を `/` にマウントし、`/` で `index.html`、`/app.js` で JS を返す。API ルートはマウントより先に登録する。 |
+| 15 | `db_path` の相対パスは `config.toml` のあるディレクトリを基準に解決する。親ディレクトリは自動作成する。 |
+| 16 | `prompt` / `workflow` の少なくとも一方が存在すれば `none` にはしない。`prompt` 不在または JSON パース不能なら全項目未取得の `partial`。生データは保存する。 |
+| 17 | 兄弟ノードは `name` の昇順。 |
+| 18 | `file_mtime` は秒精度の UTC（`YYYY-MM-DDTHH:MM:SSZ`）。同一秒内は `id` 降順で順序が決まる。 |
