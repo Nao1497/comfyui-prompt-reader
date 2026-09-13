@@ -121,3 +121,62 @@ def test_deep_chain_stops_at_limit():
         prev = nid
     g["3"]["inputs"]["model"] = [prev, 0]
     assert extract(g).model_name is None
+
+
+# --- prompt text (TASK-11) ----------------------------------------------------
+
+RAW_POSITIVE = "  masterpiece, 1girl,\r\n (detailed \\(eyes\\)),\n\n\t日本語の説明  \n"
+RAW_NEGATIVE = "\nlowres, bad anatomy,  \\n literal backslash-n  "
+
+
+def test_prompts_are_verbatim():
+    meta = extract(standard(RAW_POSITIVE, RAW_NEGATIVE))
+    assert meta.positive_prompt == RAW_POSITIVE
+    assert meta.negative_prompt == RAW_NEGATIVE
+    assert meta.status == "full"
+
+
+def test_text_linked_to_primitive_is_followed():
+    g = standard()
+    g["20"] = {"class_type": "PrimitiveNode", "inputs": {"value": "from primitive"}}
+    g["6"]["inputs"]["text"] = ["20", 0]
+    assert extract(g).positive_prompt == "from primitive"
+
+
+def test_conditioning_combine_joins_in_order():
+    g = standard()
+    g["21"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "second part", "clip": ["4", 1]}}
+    g["22"] = {
+        "class_type": "ConditioningCombine",
+        "inputs": {"conditioning_1": ["6", 0], "conditioning_2": ["21", 0]},
+    }
+    g["3"]["inputs"]["positive"] = ["22", 0]
+    meta = extract(g)
+    assert meta.positive_prompt == "masterpiece, 1girl, standing in a field\n\nsecond part"
+    assert meta.negative_prompt == "lowres, bad anatomy"
+
+
+def test_controlnet_apply_passes_through():
+    g = standard()
+    g["23"] = {
+        "class_type": "ControlNetApply",
+        "inputs": {"conditioning": ["6", 0], "control_net": ["24", 0], "image": ["25", 0], "strength": 1.0},
+    }
+    g["3"]["inputs"]["positive"] = ["23", 0]
+    assert extract(g).positive_prompt == "masterpiece, 1girl, standing in a field"
+
+
+def test_missing_negative_encoder_gives_partial():
+    g = without(standard(), "7")
+    meta = extract(g)
+    assert meta.positive_prompt == "masterpiece, 1girl, standing in a field"
+    assert meta.negative_prompt is None
+    assert meta.status == "partial"
+
+
+def test_non_string_text_is_ignored():
+    g = standard()
+    g["6"]["inputs"]["text"] = 123
+    meta = extract(g)
+    assert meta.positive_prompt is None
+    assert meta.status == "partial"

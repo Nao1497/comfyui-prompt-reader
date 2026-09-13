@@ -239,6 +239,40 @@ def extract_resolution(graph: Graph, sampler: dict[str, Any]) -> tuple[int | Non
     return None, None
 
 
+# --- prompt text --------------------------------------------------------------
+
+PROMPT_JOINER = "\n\n"
+
+
+def extract_prompt_text(graph: Graph, value: Any) -> str | None:
+    """Follow a positive/negative link and return the text found, verbatim (FR-9).
+
+    A node with a string ``text`` input contributes that string. A linked ``text``
+    is followed (primitive nodes). A conditioning-processing node (any node whose
+    inputs carry links under a key containing "conditioning") is expanded
+    recursively and the strings found are joined, in input order, by two newlines.
+    """
+    texts = _collect_texts(graph, value, set(), 0)
+    if not texts:
+        return None
+    return PROMPT_JOINER.join(texts)
+
+
+def _collect_texts(graph: Graph, value: Any, visited: set[str], depth: int) -> list[str]:
+    node = graph.resolve(value, visited, depth) if is_link(value) else None
+    if node is None:
+        return []
+    inputs = Graph.inputs(node)
+    if "text" in inputs:
+        text = resolve_literal(graph, inputs["text"], "text")
+        return [text] if isinstance(text, str) else []
+    texts: list[str] = []
+    for key, child in inputs.items():
+        if "conditioning" in key.lower() and is_link(child):
+            texts.extend(_collect_texts(graph, child, visited, depth + 1))
+    return texts
+
+
 # --- entry point --------------------------------------------------------------
 
 def extract(prompt: dict[str, Any]) -> ExtractedMetadata:
@@ -248,6 +282,9 @@ def extract(prompt: dict[str, Any]) -> ExtractedMetadata:
     sampler = find_sampler(graph)
     if sampler is None:
         return meta.finalize()
+    sampler_inputs = Graph.inputs(sampler)
+    meta.positive_prompt = extract_prompt_text(graph, sampler_inputs.get("positive"))
+    meta.negative_prompt = extract_prompt_text(graph, sampler_inputs.get("negative"))
     extract_params(graph, sampler, meta)
     meta.model_name = extract_model_name(graph, sampler)
     meta.gen_width, meta.gen_height = extract_resolution(graph, sampler)
