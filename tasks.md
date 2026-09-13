@@ -788,7 +788,9 @@
 
 ## 実装状況
 
-TASK-1 〜 TASK-26 を実装済み。TASK-27 〜 TASK-33 は未着手。
+TASK-1 〜 TASK-33 を実装済み。
+
+TASK-27 〜 TASK-33（タグ辞書）は `python -m pytest`（167 件）で完了条件を検証し、UI は Playwright で CSV 取り込み、日本語検索、タグ選択と AND / OR 切替、フォルダとの併用、詳細の語チップからの絞り込み、LoRA トリガーワードの登録と絞り込みを確認した。design.md §6 の「規模」に実装後の実測値を記録している。
 
 TASK-1 〜 TASK-22 をすべて実装済み（各タスク 1 コミット、コミット件名に `TASK-n:` を付与）。
 自動テストは `python -m pytest`（111 件）で完了条件を検証している。フロントエンドの手動確認項目（TASK-19〜22）は Playwright + Chromium で以下を確認した。
