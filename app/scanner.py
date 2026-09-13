@@ -133,20 +133,31 @@ def _text_chunk(value: object) -> str | None:
     return str(value)
 
 
-def extract_metadata_columns(info: ImageInfo) -> tuple[dict, str]:
-    """Map raw chunks to image columns; return (columns, extraction_status) (design §4)."""
+def parse_prompt(prompt_text: str | None) -> dict | None:
+    """Parse the ``prompt`` chunk; None when absent or not a JSON object."""
+    if prompt_text is None:
+        return None
+    try:
+        prompt = json.loads(prompt_text)
+    except ValueError:
+        return None
+    return prompt if isinstance(prompt, dict) else None
+
+
+def extract_metadata_columns(info: ImageInfo) -> tuple[dict, str, dict | None]:
+    """Map raw chunks to image columns; return (columns, extraction_status, parsed prompt)."""
     if info.prompt_text is None and info.workflow_text is None:
-        return {}, "none"
-    meta = comfy_metadata.ExtractedMetadata()
-    if info.prompt_text is not None:
+        return {}, "none", None
+    prompt = parse_prompt(info.prompt_text)
+    if prompt is not None:
         try:
-            prompt = json.loads(info.prompt_text)
             meta = comfy_metadata.extract(prompt)
-        except Exception as exc:  # noqa: BLE001 - 確認事項 #16: unparsable -> partial
+        except Exception as exc:  # noqa: BLE001 - never let a weird graph stop the scan
             log.warning("prompt metadata could not be analysed: %s", exc)
             meta = comfy_metadata.ExtractedMetadata().finalize()
     else:
-        meta = meta.finalize()
+        # 確認事項 #16: workflow only, or unparsable prompt -> partial with nothing extracted
+        meta = comfy_metadata.ExtractedMetadata().finalize()
     columns = {
         "positive_prompt": meta.positive_prompt,
         "negative_prompt": meta.negative_prompt,
@@ -159,7 +170,7 @@ def extract_metadata_columns(info: ImageInfo) -> tuple[dict, str]:
         "gen_width": meta.gen_width,
         "gen_height": meta.gen_height,
     }
-    return columns, meta.status
+    return columns, meta.status, prompt
 
 
 def run_scan(config: AppConfig, conn: sqlite3.Connection) -> ScanRun:
@@ -241,7 +252,7 @@ def _register_new(
 ) -> int:
     stat = path.stat()
     info = read_image_info(path)
-    columns, extraction_status = extract_metadata_columns(info) if info else ({}, "none")
+    columns, extraction_status, prompt = extract_metadata_columns(info) if info else ({}, "none", None)
     values = {
         "content_hash": content_hash,
         "file_path": file_path,
@@ -265,6 +276,8 @@ def _register_new(
     run.created_count += 1
     if info and (info.prompt_text is not None or info.workflow_text is not None):
         repository.insert_raw_metadata(conn, image_id, info.prompt_text, info.workflow_text)
+    if prompt is not None:
+        record_lora_usage(conn, image_id, prompt, now)
     if extraction_status == "partial":
         # 確認事項 #3: extract_failed_count = newly registered images left partial.
         run.extract_failed_count += 1
@@ -273,6 +286,17 @@ def _register_new(
     else:
         _make_thumbnail(conn, config, path, image_id, run)
     return image_id
+
+
+def record_lora_usage(conn: sqlite3.Connection, image_id: int, prompt: dict, now: str) -> int:
+    """Link the image to every LoRA its workflow references; returns the number of links."""
+    try:
+        usages = comfy_metadata.extract_loras(prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("lora extraction failed for image %s: %s", image_id, exc)
+        return 0
+    repository.replace_image_loras(conn, image_id, usages, now)
+    return len(usages)
 
 
 def _needs_thumbnail(image: Image) -> bool:

@@ -47,6 +47,29 @@ CREATE TABLE IF NOT EXISTS image_raw_metadata (
     workflow_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS loras (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT    NOT NULL UNIQUE,   -- ComfyUI lora_name: path relative to the LoRA folder, "/" separators
+    file_name     TEXT    NOT NULL,
+    file_size     INTEGER,
+    file_mtime    TEXT,
+    presence      TEXT    NOT NULL,          -- active / missing / unknown (seen only in workflows)
+    trigger_words TEXT    NOT NULL DEFAULT '',
+    memo          TEXT    NOT NULL DEFAULT '',
+    created_at    TEXT    NOT NULL,
+    updated_at    TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS image_loras (
+    image_id       INTEGER NOT NULL REFERENCES images (id) ON DELETE CASCADE,
+    lora_id        INTEGER NOT NULL REFERENCES loras (id) ON DELETE CASCADE,
+    strength_model REAL,
+    strength_clip  REAL,
+    PRIMARY KEY (image_id, lora_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_loras_lora ON image_loras (lora_id);
+
 CREATE TABLE IF NOT EXISTS scan_runs (
     id                        INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at                TEXT    NOT NULL,

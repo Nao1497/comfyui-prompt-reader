@@ -176,7 +176,18 @@ def list_item_to_json(row: sqlite3.Row) -> dict:
     }
 
 
-def image_to_json(img: Image) -> dict:
+def image_lora_to_json(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "presence": row["presence"],
+        "triggerWords": row["trigger_words"],
+        "strengthModel": row["strength_model"],
+        "strengthClip": row["strength_clip"],
+    }
+
+
+def image_to_json(img: Image, loras: list[dict] | None = None) -> dict:
     return {
         "id": img.id,
         "fileName": img.file_name,
@@ -205,6 +216,7 @@ def image_to_json(img: Image) -> dict:
             "genWidth": img.gen_width,
             "genHeight": img.gen_height,
         },
+        "loras": loras or [],
     }
 
 
@@ -253,6 +265,7 @@ def _register_routes(app: FastAPI) -> None:
         missing_only: bool = False,
         dir: str | None = None,
         recursive: bool = True,
+        lora: int | None = None,
     ):
         # 確認事項 #10(a): missing_only is an addition for the "見つからない" pane.
         # 確認事項 #8: dir omitted -> no folder filter; dir="" -> root (see repository).
@@ -262,6 +275,7 @@ def _register_routes(app: FastAPI) -> None:
             "missing_only": missing_only,
             "dir": dir.strip("/") if dir is not None else None,
             "recursive": recursive,
+            "lora": lora,
         }
         decoded = decode_cursor(cursor) if cursor is not None else None
         with with_db(request) as conn:
@@ -278,9 +292,10 @@ def _register_routes(app: FastAPI) -> None:
     def get_image(request: Request, image_id: int):
         with with_db(request) as conn:
             img = repository.get_image(conn, image_id)
+            loras = repository.get_image_loras(conn, image_id) if img else []
         if img is None:
             raise not_found()
-        return image_to_json(img)
+        return image_to_json(img, [image_lora_to_json(r) for r in loras])
 
     @app.get("/images/{image_id}/thumbnail")
     def get_thumbnail(request: Request, image_id: int):

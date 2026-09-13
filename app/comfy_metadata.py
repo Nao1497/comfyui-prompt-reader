@@ -273,6 +273,35 @@ def _collect_texts(graph: Graph, value: Any, visited: set[str], depth: int) -> l
     return texts
 
 
+# --- LoRA usage ---------------------------------------------------------------
+
+def normalize_lora_name(name: str) -> str:
+    """ComfyUI stores lora_name relative to the LoRA folder; normalise separators."""
+    return name.replace("\\", "/").strip().lstrip("/")
+
+
+def extract_loras(prompt: dict[str, Any]) -> list["LoraUsage"]:
+    """Every node with a string ``lora_name`` input, in node-id order, de-duplicated by name."""
+    from app.models import LoraUsage
+
+    graph = Graph(prompt if isinstance(prompt, dict) else {})
+    seen: set[str] = set()
+    usages: list[LoraUsage] = []
+    for nid in graph.sorted_ids():
+        inputs = Graph.inputs(graph.nodes[nid])
+        raw = inputs.get("lora_name")
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        name = normalize_lora_name(raw)
+        if name in seen:
+            continue
+        seen.add(name)
+        strength_model = _as_float(resolve_literal(graph, inputs.get("strength_model", inputs.get("strength")), "strength_model"))
+        strength_clip = _as_float(resolve_literal(graph, inputs.get("strength_clip"), "strength_clip"))
+        usages.append(LoraUsage(name=name, strength_model=strength_model, strength_clip=strength_clip))
+    return usages
+
+
 # --- entry point --------------------------------------------------------------
 
 def extract(prompt: dict[str, Any]) -> ExtractedMetadata:
