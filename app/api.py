@@ -20,9 +20,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import db, folders, lora_scanner, repository, scanner, tag_importer
+from app import db, folders, lora_scanner, prompt_tokens, repository, scanner, tag_importer
 from app.config import AppConfig
-from app.models import Image, Lora, ScanRun, TagImport
+from app.models import Image, Lora, ScanRun, Tag, TagImport
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -199,6 +199,27 @@ def lora_to_json(lora: Lora) -> dict:
     }
 
 
+def tag_to_json(tag: Tag, lora_name: str | None = None) -> dict:
+    return {
+        "id": tag.id,
+        "name": tag.name,
+        "nameNormalized": tag.name_normalized,
+        "category": tag.category,
+        "categoryName": tag.category_name,
+        "postCount": tag.post_count,
+        "tagCreatedAt": tag.tag_created_at,
+        "aliases": tag.aliases,
+        "otherNames": tag.other_names,
+        "postsUrl": tag.posts_url,
+        "wikiUrl": tag.wiki_url,
+        "hasWiki": tag.has_wiki,
+        "source": tag.source,
+        "loraId": tag.lora_id,
+        "loraName": lora_name,
+        "imageCount": tag.image_count,
+    }
+
+
 def tag_import_to_json(run: TagImport) -> dict:
     return {
         "tagImportId": run.id,
@@ -300,6 +321,35 @@ def _register_routes(app: FastAPI) -> None:
             return tag_import_to_json(run)
         finally:
             scan_lock.release()
+
+    @app.get("/tags/search")
+    def get_tags_search(
+        request: Request,
+        q: str = "",
+        limit: int = Query(50, ge=1, le=200),
+        category: int | None = None,
+        source: str | None = None,
+    ):
+        """FR-51: search every column. The query is normalised like a prompt word first."""
+        query = prompt_tokens.normalize_name(q)
+        with with_db(request) as conn:
+            tags = repository.search_tags(conn, query, limit, category, source)
+        return {"items": [tag_to_json(t) for t in tags]}
+
+    @app.get("/tags/used")
+    def get_tags_used(request: Request, limit: int = Query(200, ge=1, le=1000)):
+        with with_db(request) as conn:
+            tags = repository.list_used_tags(conn, limit)
+        return {"items": [tag_to_json(t) for t in tags]}
+
+    @app.get("/tags/{tag_id}")
+    def get_tag(request: Request, tag_id: int):
+        with with_db(request) as conn:
+            tag = repository.get_tag(conn, tag_id)
+            lora = repository.get_lora(conn, tag.lora_id) if tag and tag.lora_id else None
+        if tag is None:
+            raise not_found("tag not found")
+        return tag_to_json(tag, lora.name if lora else None)
 
     # --- LoRA management (FR-41) ---------------------------------------------
 

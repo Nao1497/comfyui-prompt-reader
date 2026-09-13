@@ -7,7 +7,7 @@ from typing import Any
 
 from app import db
 
-from app.models import Image, Lora, LoraUsage, RawMetadata, ScanRun, TagImport
+from app.models import Image, Lora, LoraUsage, RawMetadata, ScanRun, Tag, TagImport
 
 IMAGE_COLUMNS = [
     "id", "content_hash", "file_path", "dir_path", "file_name", "file_size",
@@ -482,3 +482,89 @@ def count_tags(conn: sqlite3.Connection, source: str | None = None) -> int:
     if source is None:
         return int(conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0])
     return int(conn.execute("SELECT COUNT(*) FROM tags WHERE source = ?", (source,)).fetchone()[0])
+
+
+# --- tag lookup / search (FR-51 / FR-52) -------------------------------------
+
+TAG_COLUMNS = [
+    "id", "name", "name_normalized", "category", "category_name", "post_count", "tag_created_at",
+    "aliases", "other_names", "posts_url", "wiki_url", "has_wiki", "source", "lora_id",
+    "created_at", "updated_at",
+]
+_TAG_SELECT = (
+    "SELECT " + ", ".join("t." + c for c in TAG_COLUMNS)
+    + ", (SELECT COUNT(*) FROM image_tags it JOIN images i ON i.id = it.image_id"
+    + "    WHERE it.tag_id = t.id AND i.presence = 'active') AS image_count"
+    + " FROM tags t"
+)
+
+
+def _row_to_tag(row: sqlite3.Row) -> Tag:
+    return Tag(**{c: row[c] for c in TAG_COLUMNS}, image_count=int(row["image_count"]))
+
+
+def get_tag(conn: sqlite3.Connection, tag_id: int) -> Tag | None:
+    row = conn.execute(_TAG_SELECT + " WHERE t.id = ?", (tag_id,)).fetchone()
+    return _row_to_tag(row) if row else None
+
+
+def find_tag_by_normalized(conn: sqlite3.Connection, name_normalized: str) -> Tag | None:
+    row = conn.execute(_TAG_SELECT + " WHERE t.name_normalized = ?", (name_normalized,)).fetchone()
+    return _row_to_tag(row) if row else None
+
+
+def _tag_filters(category: int | None, source: str | None) -> tuple[str, list[Any]]:
+    clauses, params = [], []
+    if category is not None:
+        clauses.append("t.category = ?")
+        params.append(category)
+    if source is not None:
+        clauses.append("t.source = ?")
+        params.append(source)
+    return (" AND " + " AND ".join(clauses)) if clauses else "", params
+
+
+def search_tags(
+    conn: sqlite3.Connection, query: str, limit: int,
+    category: int | None = None, source: str | None = None,
+) -> list[Tag]:
+    """Search every imported column; ``query`` must already be normalised (design §7).
+
+    Uses the FTS5 trigram index when present and the query has at least three
+    characters (the trigram minimum); otherwise falls back to LIKE.
+    """
+    extra, params = _tag_filters(category, source)
+    if not query:
+        rows = conn.execute(
+            _TAG_SELECT + " WHERE 1 = 1" + extra + " ORDER BY t.post_count DESC, t.id LIMIT ?",
+            params + [limit],
+        ).fetchall()
+    elif len(query) >= 3 and db.fts_available(conn):
+        phrase = '"' + query.replace('"', '""') + '"'
+        rows = conn.execute(
+            _TAG_SELECT.replace(" FROM tags t", " FROM tags_fts f JOIN tags t ON t.id = f.rowid")
+            + " WHERE tags_fts MATCH ?" + extra + " ORDER BY t.post_count DESC, t.id LIMIT ?",
+            [phrase] + params + [limit],
+        ).fetchall()
+    else:
+        like = "%" + _like_prefix(query) + "%"
+        rows = conn.execute(
+            _TAG_SELECT
+            + " WHERE (t.name_normalized LIKE ? ESCAPE '\\' OR t.aliases LIKE ? ESCAPE '\\'"
+            + " OR t.other_names LIKE ? ESCAPE '\\' OR t.category_name LIKE ? ESCAPE '\\')"
+            + extra + " ORDER BY t.post_count DESC, t.id LIMIT ?",
+            [like, like, like, like] + params + [limit],
+        ).fetchall()
+    return [_row_to_tag(r) for r in rows]
+
+
+def list_used_tags(conn: sqlite3.Connection, limit: int) -> list[Tag]:
+    """Tags linked to at least one active image, most used first (left pane)."""
+    rows = conn.execute(
+        "SELECT " + ", ".join("t." + c for c in TAG_COLUMNS) + ", COUNT(*) AS image_count"
+        + "  FROM image_tags it JOIN images i ON i.id = it.image_id JOIN tags t ON t.id = it.tag_id"
+        + " WHERE i.presence = 'active'"
+        + " GROUP BY t.id ORDER BY image_count DESC, t.post_count DESC, t.name LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [_row_to_tag(r) for r in rows]
