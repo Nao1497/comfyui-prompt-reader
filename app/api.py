@@ -205,8 +205,16 @@ def _register_routes(app: FastAPI) -> None:
         request: Request,
         cursor: str | None = None,
         limit: int = Query(100, ge=1, le=300),
+        favorite_only: bool = False,
+        include_missing: bool = False,
+        missing_only: bool = False,
     ):
-        filters: dict = {}
+        # 確認事項 #10(a): missing_only is an addition for the "見つからない" pane.
+        filters: dict = {
+            "favorite_only": favorite_only,
+            "include_missing": include_missing,
+            "missing_only": missing_only,
+        }
         decoded = decode_cursor(cursor) if cursor is not None else None
         with with_db(request) as conn:
             total = None if decoded is not None else repository.count_images_filtered(conn, **filters)

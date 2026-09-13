@@ -101,3 +101,64 @@ def test_unknown_id_is_json_404(client):
     assert resp.status_code == 404
     assert resp.headers["content-type"].startswith("application/json")
     assert resp.json() == {"error": {"code": "NOT_FOUND", "message": "image not found"}}
+
+
+# --- favorite_only / include_missing / missing_only ---------------------------
+
+def _ids(resp):
+    return {i["id"] for i in resp.json()["items"]}
+
+
+def test_favorite_only_filter(client, scan_root):
+    _seed_images(client, scan_root, 3)
+    ids = sorted(_ids(client.get("/images")))
+    fav = ids[0]
+
+    client.put(f"/images/{fav}/favorite", json={"is_favorite": True})
+    resp = client.get("/images", params={"favorite_only": "true"})
+    assert _ids(resp) == {fav}
+    assert resp.json()["totalCount"] == 1
+
+    client.put(f"/images/{fav}/favorite", json={"is_favorite": False})
+    resp = client.get("/images", params={"favorite_only": "true"})
+    assert _ids(resp) == set()
+    assert resp.json()["totalCount"] == 0
+    assert client.get("/images").json()["totalCount"] == 3
+
+
+def test_missing_is_excluded_by_default(client, scan_root):
+    _seed_images(client, scan_root, 2)
+    (scan_root / "img00.png").unlink()
+    client.post("/scan")
+    all_items = {i["fileName"]: i for i in client.get("/images", params={"include_missing": "true"}).json()["items"]}
+    gone = all_items["img00.png"]["id"]
+
+    default = client.get("/images")
+    assert gone not in _ids(default)
+    assert default.json()["totalCount"] == 1
+
+    with_missing = client.get("/images", params={"include_missing": "true"})
+    assert gone in _ids(with_missing)
+    assert with_missing.json()["totalCount"] == 2
+
+    only_missing = client.get("/images", params={"missing_only": "true"})
+    assert _ids(only_missing) == {gone}
+    assert only_missing.json()["totalCount"] == 1
+
+    # Detail still works for a missing image.
+    assert client.get(f"/images/{gone}").json()["presence"] == "missing"
+
+
+def test_filters_combine_with_cursor(client, scan_root):
+    _seed_images(client, scan_root, 5, same_mtime=True)
+    ids = sorted(_ids(client.get("/images")))
+    for i in ids[:4]:
+        client.put(f"/images/{i}/favorite", json={"is_favorite": True})
+
+    first = client.get("/images", params={"favorite_only": "true", "limit": 3}).json()
+    second = client.get(
+        "/images", params={"favorite_only": "true", "limit": 3, "cursor": first["nextCursor"]}
+    ).json()
+    got = [i["id"] for i in first["items"] + second["items"]]
+    assert sorted(got) == ids[:4]
+    assert second["nextCursor"] is None
