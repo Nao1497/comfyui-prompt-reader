@@ -89,7 +89,7 @@ def test_file_info_is_recorded(config, conn, scan_root: Path):
     assert img.file_mtime == "2023-11-14T22:13:20Z"
     assert img.content_hash == hashlib.sha256(path.read_bytes()).hexdigest()
     assert img.extraction_status == "none"
-    assert img.thumbnail_status == "pending"
+    assert img.thumbnail_status == "ok"  # thumbnails generated since TASK-15
     assert img.is_favorite is False
 
 

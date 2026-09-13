@@ -13,9 +13,9 @@ from pathlib import Path
 
 from PIL import Image as PILImage
 
-from app import comfy_metadata, repository
+from app import comfy_metadata, repository, thumbnailer
 from app.config import AppConfig
-from app.models import ScanRun
+from app.models import Image, ScanRun
 
 log = logging.getLogger(__name__)
 
@@ -166,17 +166,20 @@ def run_scan(config: AppConfig, conn: sqlite3.Connection) -> ScanRun:
             image_id = _register_new(
                 conn, config, path, content_hash, file_path, dir_path, file_name, now, run
             )
-        elif existing.file_path == file_path:
-            image_id = existing.id
-            repository.set_presence(conn, image_id, "active", now)
         else:
-            # FR-4: same content at a new path. 確認事項 #5: dir_path is updated too.
             image_id = existing.id
-            repository.update_image_path(
-                conn, image_id, file_path, dir_path, file_name,
-                mtime_to_iso(path.stat().st_mtime), now,
-            )
-            run.updated_count += 1
+            if existing.file_path == file_path:
+                repository.set_presence(conn, image_id, "active", now)
+            else:
+                # FR-4: same content at a new path. 確認事項 #5: dir_path is updated too.
+                repository.update_image_path(
+                    conn, image_id, file_path, dir_path, file_name,
+                    mtime_to_iso(path.stat().st_mtime), now,
+                )
+                run.updated_count += 1
+            if _needs_thumbnail(existing):
+                # FR-29: retry only failed ones (確認事項 #5: regardless of path change).
+                _make_thumbnail(conn, config, path, image_id, run)
         seen_ids.add(image_id)
         conn.commit()
 
@@ -229,4 +232,29 @@ def _register_new(
     if extraction_status == "partial":
         # 確認事項 #3: extract_failed_count = newly registered images left partial.
         run.extract_failed_count += 1
+    if info is None:
+        run.thumbnail_failed_count += 1
+    else:
+        _make_thumbnail(conn, config, path, image_id, run)
     return image_id
+
+
+def _needs_thumbnail(image: Image) -> bool:
+    return image.thumbnail_name is None or image.thumbnail_status != "ok"
+
+
+def _make_thumbnail(
+    conn: sqlite3.Connection, config: AppConfig, path: Path, image_id: int, run: ScanRun
+) -> None:
+    """FR-25/28: generate a thumbnail; a failure is recorded and never stops the scan."""
+    try:
+        name = thumbnailer.generate_thumbnail(
+            path, config.thumbnail_dir, config.thumbnail_max_edge, config.thumbnail_quality
+        )
+    except thumbnailer.ThumbnailError as exc:
+        log.warning("thumbnail failed: %s", exc)
+        repository.set_thumbnail(conn, image_id, None, "failed", utc_now())
+        run.thumbnail_failed_count += 1
+        return
+    repository.set_thumbnail(conn, image_id, name, "ok", utc_now())
+    run.thumbnail_generated_count += 1

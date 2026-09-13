@@ -216,3 +216,14 @@ def get_raw_metadata(conn: sqlite3.Connection, image_id: int) -> RawMetadata | N
     if row is None:
         return None
     return RawMetadata(image_id=row["image_id"], prompt_json=row["prompt_json"], workflow_json=row["workflow_json"])
+
+
+# --- thumbnails ---------------------------------------------------------------
+
+def set_thumbnail(
+    conn: sqlite3.Connection, image_id: int, thumbnail_name: str | None, status: str, now: str
+) -> None:
+    conn.execute(
+        "UPDATE images SET thumbnail_name = ?, thumbnail_status = ?, updated_at = ? WHERE id = ?",
+        (thumbnail_name, status, now, image_id),
+    )
