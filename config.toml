@@ -10,3 +10,5 @@ host = "127.0.0.1"
 port = 8000
 # FR-40: rename originals on scan to YYYYMMDDTHHMMSS_<uuid4 first 8 hex>.png (file mtime, local time)
 rename_on_scan = true
+# FR-41: folder that holds LoRA files (.safetensors / .pt / .ckpt). Optional.
+# lora_root = "/path/to/ComfyUI/models/loras"

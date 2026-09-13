@@ -18,9 +18,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import db, folders, repository, scanner
+from app import db, folders, lora_scanner, repository, scanner
 from app.config import AppConfig
-from app.models import Image, ScanRun
+from app.models import Image, Lora, ScanRun
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -147,6 +147,11 @@ class FavoriteBody(BaseModel):
     is_favorite: StrictBool
 
 
+class LoraNotesBody(BaseModel):
+    trigger_words: str | None = None
+    memo: str | None = None
+
+
 def _parse_or_raw(text: str | None):
     if text is None:
         return None
@@ -173,6 +178,22 @@ def list_item_to_json(row: sqlite3.Row) -> dict:
         "thumbnailUrl": f"/images/{row['id']}/thumbnail",
         "thumbnailStatus": row["thumbnail_status"],
         "extractionStatus": row["extraction_status"],
+    }
+
+
+def lora_to_json(lora: Lora) -> dict:
+    return {
+        "id": lora.id,
+        "name": lora.name,
+        "fileName": lora.file_name,
+        "fileSize": lora.file_size,
+        "fileMtime": lora.file_mtime,
+        "presence": lora.presence,
+        "triggerWords": lora.trigger_words,
+        "memo": lora.memo,
+        "imageCount": lora.image_count,
+        "createdAt": lora.created_at,
+        "updatedAt": lora.updated_at,
     }
 
 
@@ -237,7 +258,60 @@ def _register_routes(app: FastAPI) -> None:
             "gridMinCell": config.grid_min_cell,
             "gridMaxCell": config.grid_max_cell,
             "thumbnailMaxEdge": config.thumbnail_max_edge,
+            "loraRootConfigured": config.lora_root is not None,
         }
+
+    # --- LoRA management (FR-41) ---------------------------------------------
+
+    @app.get("/loras")
+    def get_loras(request: Request):
+        with with_db(request) as conn:
+            loras = repository.list_loras(conn)
+        return {"items": [lora_to_json(l) for l in loras]}
+
+    @app.post("/loras/scan")
+    def post_lora_scan(request: Request):
+        config: AppConfig = request.app.state.config
+        scan_lock: threading.Lock = request.app.state.scan_lock
+        if not scan_lock.acquire(blocking=False):
+            raise ApiError(409, "SCAN_IN_PROGRESS", "a scan is already running")
+        try:
+            if config.lora_root is not None and not config.lora_root.is_dir():
+                raise ApiError(400, "INVALID_LORA_ROOT", "lora root does not exist")
+            conn = db.connect(config.db_path)
+            try:
+                result = lora_scanner.run_lora_scan(config, conn)
+            finally:
+                conn.close()
+            return {
+                "loraRootConfigured": result.lora_root_configured,
+                "scannedFileCount": result.scanned_file_count,
+                "fileCreatedCount": result.file_created_count,
+                "fileMissingCount": result.file_missing_count,
+                "backfilledImageCount": result.backfilled_image_count,
+                "linkedLoraCount": result.linked_lora_count,
+            }
+        finally:
+            scan_lock.release()
+
+    @app.get("/loras/{lora_id}")
+    def get_lora(request: Request, lora_id: int):
+        with with_db(request) as conn:
+            lora = repository.get_lora(conn, lora_id)
+        if lora is None:
+            raise not_found("lora not found")
+        return lora_to_json(lora)
+
+    @app.put("/loras/{lora_id}")
+    def put_lora(request: Request, lora_id: int, body: LoraNotesBody):
+        """Edit trigger words / memo. File fields come only from the scan."""
+        with with_db(request) as conn:
+            ok = repository.update_lora_notes(conn, lora_id, body.trigger_words, body.memo, scanner.utc_now())
+            conn.commit()
+            lora = repository.get_lora(conn, lora_id) if ok else None
+        if lora is None:
+            raise not_found("lora not found")
+        return lora_to_json(lora)
 
     @app.get("/folders")
     def get_folders(request: Request):

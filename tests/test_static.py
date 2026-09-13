@@ -24,4 +24,5 @@ def test_config_endpoint(client, config):
         "gridMinCell": config.grid_min_cell,
         "gridMaxCell": config.grid_max_cell,
         "thumbnailMaxEdge": config.thumbnail_max_edge,
+        "loraRootConfigured": False,
     }
