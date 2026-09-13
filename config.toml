@@ -1,0 +1,10 @@
+# Application configuration (see design.md §1). Adjust scan_root to your environment.
+scan_root = "/path/to/comfyui/output"
+thumbnail_dir_name = ".thumbnails"
+thumbnail_max_edge = 768
+thumbnail_quality = 80
+grid_min_cell = 96
+grid_max_cell = 320
+db_path = "./data/images.db"
+host = "127.0.0.1"
+port = 8000
