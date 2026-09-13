@@ -10,6 +10,7 @@ import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query, Request
+from pydantic import BaseModel, StrictBool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -134,6 +135,10 @@ def decode_cursor(cursor: str) -> tuple[str, int]:
         raise ApiError(422, "VALIDATION_ERROR", "invalid cursor") from exc
 
 
+class FavoriteBody(BaseModel):
+    is_favorite: StrictBool
+
+
 # --- serialisation ------------------------------------------------------------
 
 def list_item_to_json(row: sqlite3.Row) -> dict:
@@ -220,6 +225,16 @@ def _register_routes(app: FastAPI) -> None:
         if img is None:
             raise not_found()
         return image_to_json(img)
+
+    @app.put("/images/{image_id}/favorite")
+    def put_favorite(request: Request, image_id: int, body: FavoriteBody):
+        """FR-19/20/21: only images.is_favorite and updated_at change; files are never touched."""
+        with with_db(request) as conn:
+            updated = repository.set_favorite(conn, image_id, body.is_favorite, scanner.utc_now())
+            conn.commit()
+        if not updated:
+            raise not_found()
+        return {"id": image_id, "isFavorite": body.is_favorite}
 
     @app.post("/scan")
     def post_scan(request: Request):
