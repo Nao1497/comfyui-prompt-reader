@@ -85,3 +85,14 @@ def conn(config: AppConfig):
 @pytest.fixture
 def sqlite_row_factory() -> type[sqlite3.Row]:
     return sqlite3.Row
+
+
+@pytest.fixture
+def client(config: AppConfig):
+    from fastapi.testclient import TestClient
+
+    from app.api import create_app
+
+    app = create_app(config)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
