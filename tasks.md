@@ -551,12 +551,12 @@
 - ID: TASK-27
 - 目的: プロンプト文字列から正規化済みの語を切り出す純粋関数（FR-46）
 - 対象ファイル:
-  - 新規: `app/prompt_tokens.py`（`normalize(text) -> str`, `tokenize(prompt) -> list[str]`）
+  - 新規: `app/prompt_tokens.py`（`normalize(text) -> str`, `normalize_name(name) -> str`, `tokenize(prompt) -> list[str]`）
   - 新規: `tests/test_prompt_tokens.py`
 - 完了条件:
   - design.md §6「正規化」の 6 手順を実装する。カンマ分割、重み指定と強調括弧の除去、括弧エスケープの復元、アンダースコアから半角空白への置換、小文字化、前後空白の除去
   - `<lora:...>`、`BREAK`、埋め込み名を語として返さない。空文字列を返さない
-  - 辞書側の名前にも同じ関数を当てて `name_normalized` を作れる
+  - 辞書側の名前には `normalize_name`（手順 4 〜 6 のみ。括弧は残す）を当てて `name_normalized` を作る
   - 検証: `pytest tests/test_prompt_tokens.py`
     - `masterpiece, (long hair:1.2), [detailed], \(cosplay\)` から `["masterpiece", "long hair", "detailed", "(cosplay)"]` が得られる
     - 入れ子の括弧、全角文字、連続カンマ、空要素、前後空白
