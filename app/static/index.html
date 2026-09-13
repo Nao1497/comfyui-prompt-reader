@@ -79,6 +79,22 @@
   pre.prompt.empty { color: var(--muted); font-style: italic; }
   .copied { color: #7fd48a; font-size: 11px; margin-left: 6px; }
   a { color: var(--accent); }
+  /* LoRA */
+  #lora-scan-btn { width: 100%; margin-bottom: 4px; }
+  #lora-scan-result { font-size: 12px; white-space: pre-line; margin-bottom: 4px; }
+  .item .presence { font-size: 10px; padding: 0 4px; border-radius: 3px; border: 1px solid var(--border); color: var(--muted); margin-left: auto; flex: none; }
+  .item .label { flex: 1; }
+  .item .presence.missing { color: #f08a8a; border-color: #7a3a3a; }
+  .item .presence.unknown { color: #d7b45a; border-color: #6b5a1e; }
+  .lora-editor label { display: block; color: var(--muted); margin: 8px 0 4px; }
+  .lora-editor textarea { width: 100%; min-height: 64px; background: #141517; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+  .lora-editor .actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .lora-editor .saved { color: #7fd48a; font-size: 11px; }
+  ul.lora-usage { list-style: none; margin: 0 0 8px; padding: 0; }
+  ul.lora-usage li { padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 4px; }
+  ul.lora-usage .lora-name { cursor: pointer; color: var(--accent); }
+  ul.lora-usage .strength { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  ul.lora-usage .trigger { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -96,6 +112,11 @@
     <h2>フォルダ</h2>
     <label class="muted"><input type="checkbox" id="recursive" checked> サブフォルダを含む</label>
     <ul id="folder-tree" class="tree"></ul>
+
+    <h2>LoRA</h2>
+    <button id="lora-scan-btn" type="button">LoRA スキャン</button>
+    <div id="lora-scan-result" class="muted"></div>
+    <ul id="lora-list" class="tree"></ul>
   </aside>
 
   <main id="center" class="pane">

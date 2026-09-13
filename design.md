@@ -37,6 +37,7 @@
   - `db_path`: SQLite ファイルパス（既定 `./data/images.db`）
   - `host` / `port`（既定 `127.0.0.1` / `8000`）
   - `rename_on_scan`: スキャン時の自動リネーム（FR-40）を行うか（既定 `true`）
+  - `lora_root`: LoRA ファイルのルートフォルダ絶対パス（任意。未設定なら LoRA はワークフローからのみ登録される）
 
 ### ディレクトリ構成
 
@@ -50,6 +51,8 @@ app/
 ├── scanner.py           # フォルダ走査、ハッシュ算出、登録・更新
 ├── comfy_metadata.py    # ComfyUI グラフ解析
 ├── thumbnailer.py       # WebP サムネイル生成
+├── lora_scanner.py      # LoRA フォルダ走査と画像との関連付け（FR-41 / FR-42）
+├── folders.py           # dir_path からのフォルダツリー導出
 ├── api.py               # FastAPI ルーティング
 └── static/
     ├── index.html
@@ -115,6 +118,24 @@ SQLite 設定:
   - `image_id` (INTEGER, PK) — `images.id` を参照
   - `prompt_json` (TEXT) — tEXt チャンク `prompt` の原文
   - `workflow_json` (TEXT) — tEXt チャンク `workflow` の原文
+
+### `loras`
+
+- 用途: LoRA 1 件の情報と利用者メモ（FR-41 / FR-43）
+- columns:
+  - `id` (INTEGER, PK, AUTOINCREMENT)
+  - `name` (TEXT, NOT NULL, UNIQUE) — ComfyUI の `lora_name` と同じ `lora_root` からの相対パス。区切りは `/`
+  - `file_name` (TEXT, NOT NULL)
+  - `file_size` (INTEGER) / `file_mtime` (TEXT) — ファイル未検出なら NULL
+  - `presence` (TEXT, NOT NULL) — `active` / `missing` / `unknown`（ワークフローでのみ検出）
+  - `trigger_words` (TEXT, NOT NULL, default '') / `memo` (TEXT, NOT NULL, default '')
+  - `created_at` / `updated_at` (TEXT, NOT NULL)
+
+### `image_loras`
+
+- 用途: 画像と LoRA の多対多（FR-42）
+- columns: `image_id` (FK images, CASCADE), `lora_id` (FK loras, CASCADE), `strength_model` (REAL), `strength_clip` (REAL)。PK は `(image_id, lora_id)`
+- indexes: `idx_image_loras_lora (lora_id)`
 
 ### `scan_runs`
 
@@ -335,6 +356,29 @@ SQLite 設定:
 - 原寸画像を `image/png` で返す
 - `presence = 'missing'` またはファイル不在 → `404 FILE_MISSING`
 
+### `GET /loras`
+
+- 全 LoRA を `name` 昇順で返す。各項目に `imageCount`（active な使用画像数）を含む。
+
+### `POST /loras/scan`
+
+- `lora_root` が設定されていれば配下の `.safetensors` / `.pt` / `.ckpt` を走査し、`name` で upsert、`file_size` / `file_mtime` / `presence='active'` を更新、出現しなかった `active` を `missing` にする。`lora_root` 不在 → `400 INVALID_LORA_ROOT`
+- 続けて `image_raw_metadata.prompt_json` を持つ全画像について `lora_name` を持つノードを抽出し `image_loras` を張り直す（登録済み画像のバックフィル）
+- 画像スキャンと同じロックを使い、実行中は `409 SCAN_IN_PROGRESS`
+- 応答: `loraRootConfigured`, `scannedFileCount`, `fileCreatedCount`, `fileMissingCount`, `backfilledImageCount`, `linkedLoraCount`
+
+### `GET /loras/{id}` / `PUT /loras/{id}`
+
+- `PUT` の body は `{"trigger_words": string?, "memo": string?}`。指定したキーのみ更新し、更新後の LoRA を返す。未存在 → `404 NOT_FOUND`
+
+### `GET /images` の追加 query
+
+- `lora` (integer, optional) — その LoRA を使う画像のみ（`id IN (SELECT image_id FROM image_loras WHERE lora_id = ?)`）
+
+### `GET /images/{id}` の追加項目
+
+- `loras`: `[{"id", "name", "presence", "triggerWords", "strengthModel", "strengthClip"}]`
+
 ### `PUT /images/{id}/favorite`
 
 - request body: `{"is_favorite": true}`
@@ -523,6 +567,7 @@ Success Response: `200 OK`
 - **中央ペイン**: サムネイルのグリッド。CSS Grid の `grid-template-columns: repeat(auto-fill, minmax(<cell>px, 1fr))` とし、`<cell>` をスライダーで `grid_min_cell` 〜 `grid_max_cell` の範囲で変更する。
   - 末尾付近までスクロールした時点で `nextCursor` を用いて次を取得する（IntersectionObserver）。
   - 絞り込み条件を変更した際はカーソルと取得済み項目を破棄して先頭から取り直す。
-- **右ペイン**: 選択中画像の情報。`GET /images/{id}` の結果を表示する。
+- **左ペイン（LoRA）**: 「LoRA スキャン」ボタンと `GET /loras` の一覧（使用件数、`missing` / `unknown` バッジ）。選択すると一覧を `lora` で絞り込み、右ペインに LoRA エディタ（ファイル情報、Trigger Words、メモ、保存、Trigger Words のコピー）を表示する。
+- **右ペイン**: 選択中画像の情報。使用 LoRA（strength と Trigger Words、コピーボタン）を表示し、LoRA 名から LoRA エディタへ移動できる。`GET /images/{id}` の結果を表示する。
   - positive / negative プロンプトはそれぞれ独立したコピーボタンを持つ。コピー対象は API が返した文字列そのものとし、表示上の整形を反映しない（FR-9）。
   - `extractionStatus` が `partial` / `none` の場合、取得できなかった項目である旨を表示する。生メタデータへのリンクを置く。
