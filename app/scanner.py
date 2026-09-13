@@ -89,6 +89,7 @@ def run_scan(config: AppConfig, conn: sqlite3.Connection) -> ScanRun:
 
     run = ScanRun(id=0, started_at=utc_now(), finished_at=None)
     seen_hashes: set[str] = set()
+    seen_ids: set[int] = set()
 
     for path in iter_png_files(scan_root, config.thumbnail_dir_name):
         run.scanned_count += 1
@@ -109,14 +110,26 @@ def run_scan(config: AppConfig, conn: sqlite3.Connection) -> ScanRun:
         file_path, dir_path, file_name = relative_parts(scan_root, path)
 
         if existing is None:
-            _register_new(conn, config, path, content_hash, file_path, dir_path, file_name, now, run)
+            image_id = _register_new(
+                conn, config, path, content_hash, file_path, dir_path, file_name, now, run
+            )
         elif existing.file_path == file_path:
-            repository.set_presence(conn, existing.id, "active", now)
+            image_id = existing.id
+            repository.set_presence(conn, image_id, "active", now)
         else:
-            # Path changed (FR-4); handled in TASK-7. For now treat as present.
-            repository.set_presence(conn, existing.id, "active", now)
+            # FR-4: same content at a new path. 確認事項 #5: dir_path is updated too.
+            image_id = existing.id
+            repository.update_image_path(
+                conn, image_id, file_path, dir_path, file_name,
+                mtime_to_iso(path.stat().st_mtime), now,
+            )
+            run.updated_count += 1
+        seen_ids.add(image_id)
         conn.commit()
 
+    # FR-5: anything active that did not show up this run is now missing.
+    # 確認事項 #4: missing_count = rows newly transitioned in this run.
+    run.missing_count = repository.mark_missing_except(conn, seen_ids, utc_now())
     run.finished_at = utc_now()
     run.id = repository.insert_scan_run(conn, run)
     conn.commit()

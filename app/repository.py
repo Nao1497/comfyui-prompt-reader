@@ -148,3 +148,50 @@ def list_images(
 def count_images_filtered(conn: sqlite3.Connection, **filters: Any) -> int:
     where, params = _list_where(filters)
     return int(conn.execute("SELECT COUNT(*) FROM images" + where, params).fetchone()[0])
+
+
+# --- rescan support -----------------------------------------------------------
+
+def update_image_path(
+    conn: sqlite3.Connection,
+    image_id: int,
+    file_path: str,
+    dir_path: str,
+    file_name: str,
+    file_mtime: str,
+    now: str,
+) -> None:
+    """FR-4: same content found at a new path. Favorite/metadata/thumbnail untouched."""
+    conn.execute(
+        """
+        UPDATE images
+           SET file_path = ?, dir_path = ?, file_name = ?, file_mtime = ?,
+               presence = 'active', updated_at = ?
+         WHERE id = ?
+        """,
+        (file_path, dir_path, file_name, file_mtime, now, image_id),
+    )
+
+
+def mark_missing_except(conn: sqlite3.Connection, seen_ids: set[int], now: str) -> int:
+    """FR-5: set presence='missing' on active rows not in ``seen_ids``; return count."""
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS seen_ids (id INTEGER PRIMARY KEY)")
+    conn.execute("DELETE FROM seen_ids")
+    conn.executemany("INSERT INTO seen_ids (id) VALUES (?)", ((i,) for i in seen_ids))
+    cur = conn.execute(
+        """
+        UPDATE images SET presence = 'missing', updated_at = ?
+         WHERE presence = 'active' AND id NOT IN (SELECT id FROM seen_ids)
+        """,
+        (now,),
+    )
+    conn.execute("DELETE FROM seen_ids")
+    return int(cur.rowcount)
+
+
+def set_favorite(conn: sqlite3.Connection, image_id: int, is_favorite: bool, now: str) -> bool:
+    cur = conn.execute(
+        "UPDATE images SET is_favorite = ?, updated_at = ? WHERE id = ?",
+        (1 if is_favorite else 0, now, image_id),
+    )
+    return cur.rowcount == 1
