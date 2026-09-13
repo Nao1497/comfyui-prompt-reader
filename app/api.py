@@ -11,16 +11,18 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request
+import io
+
+from fastapi import FastAPI, File, Query, Request, UploadFile
 from pydantic import BaseModel, StrictBool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import db, folders, lora_scanner, repository, scanner
+from app import db, folders, lora_scanner, repository, scanner, tag_importer
 from app.config import AppConfig
-from app.models import Image, Lora, ScanRun
+from app.models import Image, Lora, ScanRun, TagImport
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -197,6 +199,20 @@ def lora_to_json(lora: Lora) -> dict:
     }
 
 
+def tag_import_to_json(run: TagImport) -> dict:
+    return {
+        "tagImportId": run.id,
+        "startedAt": run.started_at,
+        "finishedAt": run.finished_at,
+        "fileName": run.file_name,
+        "readCount": run.read_count,
+        "importedCount": run.imported_count,
+        "skippedCount": run.skipped_count,
+        "aliasCount": run.alias_count,
+        "linkedImageCount": run.linked_image_count,
+    }
+
+
 def image_lora_to_json(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
@@ -260,6 +276,30 @@ def _register_routes(app: FastAPI) -> None:
             "thumbnailMaxEdge": config.thumbnail_max_edge,
             "loraRootConfigured": config.lora_root is not None,
         }
+
+    # --- Tag dictionary (FR-45) ------------------------------------------------
+
+    @app.post("/tags/import")
+    def post_tags_import(request: Request, file: UploadFile = File(...)):
+        """Replace the CSV-sourced dictionary with the uploaded danbooru tag CSV."""
+        config: AppConfig = request.app.state.config
+        scan_lock: threading.Lock = request.app.state.scan_lock
+        if file.size is not None and file.size > tag_importer.MAX_TAG_CSV_BYTES:
+            raise ApiError(400, "VALIDATION_ERROR", "tag csv is too large")
+        if not scan_lock.acquire(blocking=False):
+            raise ApiError(409, "SCAN_IN_PROGRESS", "a scan is already running")
+        try:
+            conn = db.connect(config.db_path)
+            try:
+                stream = io.TextIOWrapper(file.file, encoding="utf-8-sig", newline="")
+                run = tag_importer.run_import(conn, stream, file.filename)
+            except tag_importer.InvalidTagCsv as exc:
+                raise ApiError(400, "INVALID_TAG_CSV", str(exc)) from exc
+            finally:
+                conn.close()
+            return tag_import_to_json(run)
+        finally:
+            scan_lock.release()
 
     # --- LoRA management (FR-41) ---------------------------------------------
 

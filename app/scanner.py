@@ -297,6 +297,7 @@ def store_prompt_tokens(
     neg = prompt_tokens.tokenize(negative)
     if pos or neg:
         repository.replace_prompt_tokens(conn, image_id, pos, neg)
+        repository.link_image_tags(conn, image_id)
 
 
 def record_lora_usage(conn: sqlite3.Connection, image_id: int, prompt: dict, now: str) -> int:

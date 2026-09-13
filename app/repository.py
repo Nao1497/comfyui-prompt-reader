@@ -5,7 +5,9 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from app.models import Image, Lora, LoraUsage, RawMetadata, ScanRun
+from app import db
+
+from app.models import Image, Lora, LoraUsage, RawMetadata, ScanRun, TagImport
 
 IMAGE_COLUMNS = [
     "id", "content_hash", "file_path", "dir_path", "file_name", "file_size",
@@ -407,3 +409,76 @@ def image_ids_without_tokens(conn: sqlite3.Connection) -> list[tuple[int, str | 
         """
     ).fetchall()
     return [(int(r["id"]), r["positive_prompt"], r["negative_prompt"]) for r in rows]
+
+
+# --- tag linking (FR-47 / FR-48) ---------------------------------------------
+
+_LINK_BY_NAME = """
+    INSERT OR IGNORE INTO image_tags (image_id, tag_id)
+    SELECT DISTINCT t.image_id, g.id
+      FROM image_prompt_tokens t JOIN tags g ON g.name_normalized = t.token
+     WHERE t.side = 'positive'{extra}
+"""
+_LINK_BY_ALIAS = """
+    INSERT OR IGNORE INTO image_tags (image_id, tag_id)
+    SELECT DISTINCT t.image_id, a.tag_id
+      FROM image_prompt_tokens t JOIN tag_aliases a ON a.alias_normalized = t.token
+     WHERE t.side = 'positive'
+       AND NOT EXISTS (SELECT 1 FROM tags g WHERE g.name_normalized = t.token){extra}
+"""
+
+
+def rebuild_image_tags(conn: sqlite3.Connection) -> int:
+    """Recreate image_tags from stored tokens; return the number of linked images."""
+    conn.execute("DELETE FROM image_tags")
+    conn.execute(_LINK_BY_NAME.format(extra=""))
+    conn.execute(_LINK_BY_ALIAS.format(extra=""))
+    return int(conn.execute("SELECT COUNT(DISTINCT image_id) FROM image_tags").fetchone()[0])
+
+
+def link_image_tags(conn: sqlite3.Connection, image_id: int) -> None:
+    """Link one image (used right after registration)."""
+    conn.execute("DELETE FROM image_tags WHERE image_id = ?", (image_id,))
+    conn.execute(_LINK_BY_NAME.format(extra=" AND t.image_id = ?"), (image_id,))
+    conn.execute(_LINK_BY_ALIAS.format(extra=" AND t.image_id = ?"), (image_id,))
+
+
+def link_token_to_tag(conn: sqlite3.Connection, token: str, tag_id: int) -> int:
+    """Link every image whose positive prompt has ``token`` to ``tag_id`` (new dictionary word)."""
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO image_tags (image_id, tag_id)
+        SELECT DISTINCT image_id, ? FROM image_prompt_tokens WHERE token = ? AND side = 'positive'
+        """,
+        (tag_id, token),
+    )
+    return int(cur.rowcount)
+
+
+def get_image_tag_ids(conn: sqlite3.Connection, image_id: int) -> list[int]:
+    rows = conn.execute("SELECT tag_id FROM image_tags WHERE image_id = ? ORDER BY tag_id", (image_id,)).fetchall()
+    return [int(r["tag_id"]) for r in rows]
+
+
+def rebuild_fts(conn: sqlite3.Connection) -> None:
+    if db.fts_available(conn):
+        conn.execute("INSERT INTO tags_fts(tags_fts) VALUES ('rebuild')")
+
+
+def insert_tag_import(conn: sqlite3.Connection, run: TagImport) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO tag_imports (started_at, finished_at, file_name, read_count, imported_count,
+                                 skipped_count, alias_count, linked_image_count, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run.started_at, run.finished_at, run.file_name, run.read_count, run.imported_count,
+         run.skipped_count, run.alias_count, run.linked_image_count, run.error),
+    )
+    return int(cur.lastrowid)
+
+
+def count_tags(conn: sqlite3.Connection, source: str | None = None) -> int:
+    if source is None:
+        return int(conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0])
+    return int(conn.execute("SELECT COUNT(*) FROM tags WHERE source = ?", (source,)).fetchone()[0])
