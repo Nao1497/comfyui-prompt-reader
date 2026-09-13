@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS tag_aliases (
     PRIMARY KEY (alias_normalized, tag_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_tag_aliases_tag ON tag_aliases (tag_id);
+
 CREATE TABLE IF NOT EXISTS image_prompt_tokens (
     image_id  INTEGER NOT NULL REFERENCES images (id) ON DELETE CASCADE,
     side      TEXT    NOT NULL,                -- positive / negative
@@ -172,7 +174,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 # tokenizer needs SQLite 3.34+; when unavailable the search falls back to LIKE.
 FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS tags_fts USING fts5(
-    name, name_normalized, aliases, other_names, category_name,
+    name_normalized, aliases, other_names, category_name,
     content='tags', content_rowid='id', tokenize='trigram'
 );
 """

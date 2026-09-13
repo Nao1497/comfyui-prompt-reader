@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import IO
 
@@ -47,8 +48,10 @@ def _parse_int(value: str | None) -> int | None:
 def run_import(conn: sqlite3.Connection, stream: IO[str], file_name: str | None) -> TagImport:
     """Replace every ``source='csv'`` tag with the rows of ``stream``; keep LoRA-sourced rows.
 
-    Runs as one transaction. Raises :class:`InvalidTagCsv` before touching the
-    dictionary when the header is not the expected one.
+    Rows are staged in an index-free temporary table, then inserted sorted by the
+    matching key so the unique indexes are built in order (design §6). Runs as one
+    transaction. Raises :class:`InvalidTagCsv` before touching the dictionary when
+    the header is not the expected one.
     """
     reader = csv.DictReader(stream)
     fields = [f.strip() for f in (reader.fieldnames or [])]
@@ -59,104 +62,139 @@ def run_import(conn: sqlite3.Connection, stream: IO[str], file_name: str | None)
     started = scanner.utc_now()
     now = started
     counters = _Counters()
-    error: str | None = None
+    timer = _PhaseTimer()
     try:
-        # Rows registered from LoRA trigger words survive; a CSV row with the same
-        # normalised name takes over that row (keeping lora_id).
-        lora_rows = {
-            r["name_normalized"]: int(r["id"])
-            for r in conn.execute("SELECT id, name_normalized FROM tags WHERE source = 'lora'")
-        }
-        conn.execute("DELETE FROM tags WHERE source = 'csv'")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS temp.tag_stage;
+            DROP TABLE IF EXISTS temp.alias_stage;
+            CREATE TEMP TABLE tag_stage (
+                name TEXT, name_normalized TEXT, category INTEGER, category_name TEXT, post_count INTEGER,
+                tag_created_at TEXT, aliases TEXT, other_names TEXT, posts_url TEXT, wiki_url TEXT, has_wiki TEXT
+            );
+            CREATE TEMP TABLE alias_stage (alias_normalized TEXT, tag_name TEXT);
+            """
+        )
+        conn.execute("BEGIN")
 
+        # --- stage ------------------------------------------------------------
         batch: list[tuple] = []
-        alias_pairs: list[tuple[str, str, str]] = []
+        alias_batch: list[tuple[str, str]] = []
 
         def flush() -> None:
-            if not batch:
-                return
-            cur = conn.executemany(
-                """
-                INSERT OR IGNORE INTO tags (
-                    name, name_normalized, category, category_name, post_count, tag_created_at,
-                    aliases, other_names, posts_url, wiki_url, has_wiki, source, lora_id,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'csv', NULL, ?, ?)
-                """,
-                batch,
-            )
-            counters.imported += cur.rowcount
-            counters.skipped += len(batch) - cur.rowcount  # duplicates within the CSV
-            batch.clear()
+            if batch:
+                conn.executemany("INSERT INTO tag_stage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", batch)
+                batch.clear()
+            if alias_batch:
+                conn.executemany("INSERT INTO alias_stage VALUES (?, ?)", alias_batch)
+                alias_batch.clear()
 
         for row in reader:
             counters.read += 1
             name = (row.get("tag") or "").strip()
             category = _parse_int(row.get("category"))
             post_count = _parse_int(row.get("post_count"))
-            if not name or category is None or post_count is None:
+            nn = prompt_tokens.normalize_name(name) if name else ""
+            if not nn or category is None or post_count is None:
                 counters.skipped += 1
                 continue
-            nn = prompt_tokens.normalize_name(name)
-            if not nn:
-                counters.skipped += 1
-                continue
-            values = (
+            aliases = (row.get("aliases") or "").strip()
+            batch.append((
                 name, nn, category, (row.get("category_name") or "").strip(), post_count,
-                (row.get("created_at") or "").strip() or None,
-                (row.get("aliases") or "").strip(), (row.get("other_names") or "").strip(),
+                (row.get("created_at") or "").strip() or None, aliases,
+                (row.get("other_names") or "").strip(),
                 (row.get("posts_url") or "").strip() or None, (row.get("wiki_url") or "").strip() or None,
                 (row.get("has_wiki") or "").strip() or None,
-            )
-            for alias in values[6].split(","):
-                a = prompt_tokens.normalize_name(alias)
-                if a and a != nn:
-                    alias_pairs.append((a, name, a))
-            lora_id = lora_rows.pop(nn, None)
-            if lora_id is not None:
-                conn.execute(
-                    """
-                    UPDATE tags SET name = ?, category = ?, category_name = ?, post_count = ?,
-                        tag_created_at = ?, aliases = ?, other_names = ?, posts_url = ?, wiki_url = ?,
-                        has_wiki = ?, source = 'csv', updated_at = ?
-                     WHERE id = ?
-                    """,
-                    (values[0], values[2], values[3], values[4], values[5], values[6], values[7],
-                     values[8], values[9], values[10], now, lora_id),
-                )
-                counters.imported += 1
-                continue
-            batch.append(values + (now, now))
+            ))
+            if aliases:
+                for alias in aliases.split(","):
+                    a = prompt_tokens.normalize_name(alias)
+                    if a and a != nn:
+                        alias_batch.append((a, name))
             if len(batch) >= BATCH_SIZE:
                 flush()
         flush()
+        staged = int(conn.execute("SELECT COUNT(*) FROM tag_stage").fetchone()[0])
+        timer.mark("stage")
 
-        # Aliases resolve to the canonical tag; an alias that is itself a canonical
-        # name is never stored, so canonical names always win (FR-47).
-        conn.executemany(
+        # --- replace CSV rows -------------------------------------------------
+        # Remove child rows as sets first; per-row FK cascades over a million
+        # parents are far slower than these three statements.
+        conn.execute("DELETE FROM tag_aliases WHERE tag_id IN (SELECT id FROM tags WHERE source = 'csv')")
+        conn.execute("DELETE FROM image_tags WHERE tag_id IN (SELECT id FROM tags WHERE source = 'csv')")
+        conn.execute("DELETE FROM tags WHERE source = 'csv'")
+        timer.mark("delete")
+        # A CSV row with the same normalised name as a LoRA trigger word takes that row over.
+        cur = conn.execute(
+            """
+            UPDATE tags SET name = s.name, category = s.category, category_name = s.category_name,
+                post_count = s.post_count, tag_created_at = s.tag_created_at, aliases = s.aliases,
+                other_names = s.other_names, posts_url = s.posts_url, wiki_url = s.wiki_url,
+                has_wiki = s.has_wiki, source = 'csv', updated_at = ?
+              FROM tag_stage AS s
+             WHERE tags.name_normalized = s.name_normalized AND tags.source = 'lora'
+            """,
+            (now,),
+        )
+        taken_over = int(cur.rowcount)
+        conn.execute(
+            "DELETE FROM tag_stage WHERE name_normalized IN (SELECT name_normalized FROM tags)"
+        )
+        for idx in ("idx_tags_post_count", "idx_tags_source"):
+            conn.execute(f"DROP INDEX IF EXISTS {idx}")
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO tags (
+                name, name_normalized, category, category_name, post_count, tag_created_at,
+                aliases, other_names, posts_url, wiki_url, has_wiki, source, lora_id, created_at, updated_at
+            )
+            SELECT name, name_normalized, category, category_name, post_count, tag_created_at,
+                   aliases, other_names, posts_url, wiki_url, has_wiki, 'csv', NULL, ?, ?
+              FROM tag_stage ORDER BY name_normalized
+            """,
+            (now, now),
+        )
+        inserted = int(cur.rowcount)
+        counters.imported = inserted + taken_over
+        counters.skipped += staged - inserted - taken_over  # duplicates within the CSV
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_post_count ON tags (post_count DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_source ON tags (source)")
+        timer.mark("insert")
+
+        # --- aliases (FR-47): a canonical name is never also an alias ----------
+        conn.execute(
             """
             INSERT OR IGNORE INTO tag_aliases (alias_normalized, tag_id)
-            SELECT ?, id FROM tags WHERE name = ?
-               AND NOT EXISTS (SELECT 1 FROM tags t2 WHERE t2.name_normalized = ?)
-            """,
-            alias_pairs,
+            SELECT a.alias_normalized, t.id
+              FROM alias_stage a JOIN tags t ON t.name = a.tag_name
+             WHERE NOT EXISTS (SELECT 1 FROM tags t2 WHERE t2.name_normalized = a.alias_normalized)
+            """
         )
         alias_count = int(conn.execute("SELECT COUNT(*) FROM tag_aliases").fetchone()[0])
+        timer.mark("aliases")
 
         repository.rebuild_fts(conn)
+        timer.mark("fts")
         ensure_prompt_tokens(conn)
         linked = repository.rebuild_image_tags(conn)
+        timer.mark("link")
+        conn.execute("DROP TABLE IF EXISTS temp.tag_stage")
+        conn.execute("DROP TABLE IF EXISTS temp.alias_stage")
         conn.commit()
+        timer.mark("commit")
     except Exception as exc:  # noqa: BLE001 - record the failure, keep the old dictionary
         conn.rollback()
-        error = str(exc)
         log.exception("tag import failed")
         run = TagImport(id=0, started_at=started, finished_at=scanner.utc_now(), file_name=file_name,
-                        read_count=counters.read, error=error)
+                        read_count=counters.read, error=str(exc))
         run.id = repository.insert_tag_import(conn, run)
         conn.commit()
         raise
+    finally:
+        conn.execute("PRAGMA synchronous = FULL")
 
+    log.info("tag import: %s rows, %s", counters.read, timer.summary())
     run = TagImport(
         id=0, started_at=started, finished_at=scanner.utc_now(), file_name=file_name,
         read_count=counters.read, imported_count=counters.imported, skipped_count=counters.skipped,
@@ -165,6 +203,20 @@ def run_import(conn: sqlite3.Connection, stream: IO[str], file_name: str | None)
     run.id = repository.insert_tag_import(conn, run)
     conn.commit()
     return run
+
+
+class _PhaseTimer:
+    def __init__(self) -> None:
+        self._t = time.perf_counter()
+        self.phases: list[tuple[str, float]] = []
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self.phases.append((name, now - self._t))
+        self._t = now
+
+    def summary(self) -> str:
+        return ", ".join(f"{n}={s:.1f}s" for n, s in self.phases)
 
 
 def ensure_prompt_tokens(conn: sqlite3.Connection) -> int:
