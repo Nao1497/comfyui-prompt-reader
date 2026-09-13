@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, Request
 from pydantic import BaseModel, StrictBool
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import db, repository, scanner
@@ -243,6 +243,36 @@ def _register_routes(app: FastAPI) -> None:
         if img is None:
             raise not_found()
         return image_to_json(img)
+
+    @app.get("/images/{image_id}/thumbnail")
+    def get_thumbnail(request: Request, image_id: int):
+        """FR-30/31: served even when the original is missing, as long as the file exists."""
+        config: AppConfig = request.app.state.config
+        with with_db(request) as conn:
+            img = repository.get_image(conn, image_id)
+        if img is None:
+            raise not_found()
+        if img.thumbnail_status != "ok" or not img.thumbnail_name:
+            raise ApiError(404, "THUMBNAIL_UNAVAILABLE", "thumbnail is not available")
+        path = config.thumbnail_dir / img.thumbnail_name
+        if not path.is_file():
+            raise ApiError(404, "THUMBNAIL_UNAVAILABLE", "thumbnail file is missing")
+        return FileResponse(
+            path, media_type="image/webp", headers={"Cache-Control": "public, max-age=86400"}
+        )
+
+    @app.get("/images/{image_id}/file")
+    def get_file(request: Request, image_id: int):
+        """FR-18: the original PNG."""
+        config: AppConfig = request.app.state.config
+        with with_db(request) as conn:
+            img = repository.get_image(conn, image_id)
+        if img is None:
+            raise not_found()
+        path = config.scan_root / img.file_path
+        if img.presence == "missing" or not path.is_file():
+            raise ApiError(404, "FILE_MISSING", "image file is missing")
+        return FileResponse(path, media_type="image/png")
 
     @app.get("/images/{image_id}/raw-metadata")
     def get_raw_metadata(request: Request, image_id: int):
