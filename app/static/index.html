@@ -21,6 +21,8 @@
   #center { display: flex; flex-direction: column; }
   #toolbar { display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
   #toolbar .muted { color: var(--muted); }
+  #cell-size { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  #cell-slider { width: 160px; }
   #grid-wrap { flex: 1; overflow: auto; padding: 12px; }
   #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--cell), 1fr)); gap: 8px; }
   .cell {
@@ -49,6 +51,11 @@
     <div id="toolbar">
       <span id="filter-label">すべて</span>
       <span id="total" class="muted"></span>
+      <label id="cell-size" title="サムネイル表示サイズ">
+        <span class="muted">サイズ</span>
+        <input id="cell-slider" type="range" min="96" max="320" step="8" value="160">
+        <span id="cell-value" class="muted">160px</span>
+      </label>
     </div>
     <div id="grid-wrap">
       <div id="grid"></div>

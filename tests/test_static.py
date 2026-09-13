@@ -16,3 +16,12 @@ def test_api_routes_are_not_shadowed(client):
     assert client.get("/folders").status_code == 200
     assert client.get("/nope").status_code == 404
     assert client.get("/nope").headers["content-type"].startswith("application/json")
+
+
+def test_config_endpoint(client, config):
+    body = client.get("/config").json()
+    assert body == {
+        "gridMinCell": config.grid_min_cell,
+        "gridMaxCell": config.grid_max_cell,
+        "thumbnailMaxEdge": config.thumbnail_max_edge,
+    }

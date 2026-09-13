@@ -216,6 +216,16 @@ def _register_routes(app: FastAPI) -> None:
     def health():
         return {"status": "ok"}
 
+    @app.get("/config")
+    def get_config(request: Request):
+        """確認事項 #11: expose the grid bounds so the front end can size its slider."""
+        config: AppConfig = request.app.state.config
+        return {
+            "gridMinCell": config.grid_min_cell,
+            "gridMaxCell": config.grid_max_cell,
+            "thumbnailMaxEdge": config.thumbnail_max_edge,
+        }
+
     @app.get("/folders")
     def get_folders(request: Request):
         config: AppConfig = request.app.state.config

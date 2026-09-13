@@ -148,7 +148,34 @@
   }, { root: $('#grid-wrap'), rootMargin: '400px 0px' });
   observer.observe(sentinel);
 
-  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet };
+  // --- cell size slider (FR-39) ---------------------------------------------
+  const slider = $('#cell-slider');
+  const cellValue = $('#cell-value');
 
+  function applyCellSize(px) {
+    document.documentElement.style.setProperty('--cell', `${px}px`);
+    cellValue.textContent = `${px}px`;
+    try { localStorage.setItem('cellSize', String(px)); } catch (_) { /* ignore */ }
+  }
+
+  slider.addEventListener('input', () => applyCellSize(Number(slider.value)));
+
+  async function initCellSize() {
+    try {
+      const cfg = await apiGet('/config');
+      slider.min = String(cfg.gridMinCell);
+      slider.max = String(cfg.gridMaxCell);
+    } catch (_) { /* keep HTML defaults */ }
+    let saved = null;
+    try { saved = Number(localStorage.getItem('cellSize')) || null; } catch (_) { /* ignore */ }
+    const min = Number(slider.min), max = Number(slider.max);
+    const initial = Math.min(max, Math.max(min, saved || Number(slider.value)));
+    slider.value = String(initial);
+    applyCellSize(initial);
+  }
+
+  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize };
+
+  initCellSize();
   resetAndLoad();
 })();
