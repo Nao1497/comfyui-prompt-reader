@@ -87,3 +87,64 @@ def insert_scan_run(conn: sqlite3.Connection, run: ScanRun) -> int:
 def get_scan_run(conn: sqlite3.Connection, run_id: int) -> ScanRun | None:
     row = conn.execute("SELECT * FROM scan_runs WHERE id = ?", (run_id,)).fetchone()
     return _row_to_scan_run(row) if row else None
+
+
+# --- listing ------------------------------------------------------------------
+
+LIST_COLUMNS = [
+    "id", "file_name", "file_path", "dir_path", "file_size", "image_width",
+    "image_height", "file_mtime", "presence", "is_favorite", "thumbnail_status",
+    "extraction_status",
+]
+
+
+def _list_where(filters: dict[str, Any]) -> tuple[str, list[Any]]:
+    """Build the WHERE clause shared by list_images and count_images_filtered."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if filters.get("favorite_only"):
+        clauses.append("is_favorite = 1")
+    if filters.get("missing_only"):
+        clauses.append("presence = 'missing'")
+    elif not filters.get("include_missing"):
+        clauses.append("presence = 'active'")
+    dir_path = filters.get("dir")
+    recursive = filters.get("recursive", True)
+    if dir_path is not None:
+        # 確認事項 #8: dir='' with recursive -> no folder condition.
+        if not recursive:
+            clauses.append("dir_path = ?")
+            params.append(dir_path)
+        elif dir_path != "":
+            clauses.append("(dir_path = ? OR dir_path LIKE ? ESCAPE '\\')")
+            params.append(dir_path)
+            params.append(_like_prefix(dir_path) + "/%")
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    return where, params
+
+
+def _like_prefix(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def list_images(
+    conn: sqlite3.Connection,
+    limit: int,
+    cursor: tuple[str, int] | None = None,
+    **filters: Any,
+) -> list[sqlite3.Row]:
+    where, params = _list_where(filters)
+    if cursor is not None:
+        where += (" AND " if where else " WHERE ") + "(file_mtime, id) < (?, ?)"
+        params.extend(cursor)
+    sql = (
+        "SELECT " + ", ".join(LIST_COLUMNS) + " FROM images" + where
+        + " ORDER BY file_mtime DESC, id DESC LIMIT ?"
+    )
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
+def count_images_filtered(conn: sqlite3.Connection, **filters: Any) -> int:
+    where, params = _list_where(filters)
+    return int(conn.execute("SELECT COUNT(*) FROM images" + where, params).fetchone()[0])

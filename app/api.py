@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
+import sqlite3
 import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import db, scanner
+from app import db, repository, scanner
 from app.config import AppConfig
-from app.models import ScanRun
+from app.models import Image, ScanRun
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +37,19 @@ def error_response(status_code: int, code: str, message: str) -> JSONResponse:
 
 def not_found(message: str = "image not found") -> ApiError:
     return ApiError(404, "NOT_FOUND", message)
+
+
+class _DbHandle:
+    def __init__(self, lock: threading.Lock, conn: sqlite3.Connection):
+        self._lock = lock
+        self._conn = conn
+
+    def __enter__(self) -> sqlite3.Connection:
+        self._lock.acquire()
+        return self._conn
+
+    def __exit__(self, *exc) -> None:
+        self._lock.release()
 
 
 def create_app(config: AppConfig) -> FastAPI:
@@ -99,10 +115,111 @@ def scan_run_to_json(run: ScanRun) -> dict:
     }
 
 
+# --- cursor -------------------------------------------------------------------
+
+def encode_cursor(file_mtime: str, image_id: int) -> str:
+    raw = f"{file_mtime}|{image_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_cursor(cursor: str) -> tuple[str, int]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        raw = base64.urlsafe_b64decode(padded).decode()
+        mtime, _, id_text = raw.partition("|")
+        if not mtime or not id_text:
+            raise ValueError("cursor has no separator")
+        return mtime, int(id_text)
+    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
+        raise ApiError(422, "VALIDATION_ERROR", "invalid cursor") from exc
+
+
+# --- serialisation ------------------------------------------------------------
+
+def list_item_to_json(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "fileName": row["file_name"],
+        "filePath": row["file_path"],
+        "dirPath": row["dir_path"],
+        "fileSize": row["file_size"],
+        "imageWidth": row["image_width"],
+        "imageHeight": row["image_height"],
+        "fileMtime": row["file_mtime"],
+        "presence": row["presence"],
+        "isFavorite": bool(row["is_favorite"]),
+        "thumbnailUrl": f"/images/{row['id']}/thumbnail",
+        "thumbnailStatus": row["thumbnail_status"],
+        "extractionStatus": row["extraction_status"],
+    }
+
+
+def image_to_json(img: Image) -> dict:
+    return {
+        "id": img.id,
+        "fileName": img.file_name,
+        "filePath": img.file_path,
+        "dirPath": img.dir_path,
+        "fileSize": img.file_size,
+        "imageWidth": img.image_width,
+        "imageHeight": img.image_height,
+        "fileMtime": img.file_mtime,
+        "contentHash": img.content_hash,
+        "presence": img.presence,
+        "isFavorite": img.is_favorite,
+        "thumbnailUrl": f"/images/{img.id}/thumbnail",
+        "thumbnailStatus": img.thumbnail_status,
+        "fileUrl": f"/images/{img.id}/file",
+        "extractionStatus": img.extraction_status,
+        "generation": {
+            "positivePrompt": img.positive_prompt,
+            "negativePrompt": img.negative_prompt,
+            "modelName": img.model_name,
+            "seed": img.seed,
+            "steps": img.steps,
+            "cfg": img.cfg,
+            "samplerName": img.sampler_name,
+            "scheduler": img.scheduler,
+            "genWidth": img.gen_width,
+            "genHeight": img.gen_height,
+        },
+    }
+
+
 def _register_routes(app: FastAPI) -> None:
+    def with_db(request: Request):
+        """Context manager serialising access to the shared read connection."""
+        return _DbHandle(request.app.state.db_lock, request.app.state.conn)
+
     @app.get("/health")
     def health():
         return {"status": "ok"}
+
+    @app.get("/images")
+    def get_images(
+        request: Request,
+        cursor: str | None = None,
+        limit: int = Query(100, ge=1, le=300),
+    ):
+        filters: dict = {}
+        decoded = decode_cursor(cursor) if cursor is not None else None
+        with with_db(request) as conn:
+            total = None if decoded is not None else repository.count_images_filtered(conn, **filters)
+            rows = repository.list_images(conn, limit, decoded, **filters)
+        items = [list_item_to_json(r) for r in rows]
+        next_cursor = None
+        if len(items) == limit:
+            last = rows[-1]
+            next_cursor = encode_cursor(last["file_mtime"], last["id"])
+        return {"totalCount": total, "nextCursor": next_cursor, "items": items}
+
+    @app.get("/images/{image_id}")
+    def get_image(request: Request, image_id: int):
+        with with_db(request) as conn:
+            img = repository.get_image(conn, image_id)
+        if img is None:
+            raise not_found()
+        return image_to_json(img)
 
     @app.post("/scan")
     def post_scan(request: Request):
