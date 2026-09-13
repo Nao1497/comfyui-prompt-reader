@@ -227,3 +227,22 @@ def set_thumbnail(
         "UPDATE images SET thumbnail_name = ?, thumbnail_status = ?, updated_at = ? WHERE id = ?",
         (thumbnail_name, status, now, image_id),
     )
+
+
+# --- folders ------------------------------------------------------------------
+
+def count_active_by_dir(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    rows = conn.execute(
+        "SELECT dir_path, COUNT(*) AS n FROM images WHERE presence = 'active' GROUP BY dir_path"
+    ).fetchall()
+    return [(r["dir_path"], int(r["n"])) for r in rows]
+
+
+def count_favorites_active(conn: sqlite3.Connection) -> int:
+    return int(conn.execute(
+        "SELECT COUNT(*) FROM images WHERE presence = 'active' AND is_favorite = 1"
+    ).fetchone()[0])
+
+
+def count_missing(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) FROM images WHERE presence = 'missing'").fetchone()[0])

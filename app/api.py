@@ -16,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import db, repository, scanner
+from app import db, folders, repository, scanner
 from app.config import AppConfig
 from app.models import Image, ScanRun
 
@@ -209,6 +209,22 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/health")
     def health():
         return {"status": "ok"}
+
+    @app.get("/folders")
+    def get_folders(request: Request):
+        config: AppConfig = request.app.state.config
+        with with_db(request) as conn:
+            counts = repository.count_active_by_dir(conn)
+            favorite_count = repository.count_favorites_active(conn)
+            missing_count = repository.count_missing(conn)
+        tree, root_total = folders.build_tree(counts, config.thumbnail_dir_name)
+        return {
+            "rootTotalCount": root_total,
+            # 確認事項 #10(b): counts for the fixed left-pane items.
+            "favoriteCount": favorite_count,
+            "missingCount": missing_count,
+            "folders": tree,
+        }
 
     @app.get("/images")
     def get_images(
