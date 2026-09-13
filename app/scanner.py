@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image as PILImage
 
-from app import repository
+from app import comfy_metadata, repository
 from app.config import AppConfig
 from app.models import ScanRun
 
@@ -69,14 +71,65 @@ def relative_parts(scan_root: Path, path: Path) -> tuple[str, str, str]:
     return file_path, dir_path, rel.name
 
 
-def read_image_size(path: Path) -> tuple[int, int] | None:
-    """Return (width, height) or None when Pillow cannot open the file."""
+@dataclass
+class ImageInfo:
+    width: int
+    height: int
+    prompt_text: str | None   # raw tEXt chunk "prompt"
+    workflow_text: str | None  # raw tEXt chunk "workflow"
+
+
+def read_image_info(path: Path) -> ImageInfo | None:
+    """Return size and raw ComfyUI tEXt chunks, or None when Pillow cannot open the file."""
     try:
         with PILImage.open(path) as img:
-            return img.size
+            info = img.info
+            return ImageInfo(
+                width=img.size[0],
+                height=img.size[1],
+                prompt_text=_text_chunk(info.get("prompt")),
+                workflow_text=_text_chunk(info.get("workflow")),
+            )
     except Exception as exc:  # noqa: BLE001 - any unreadable file is "broken" here
         log.warning("cannot open %s: %s", path, exc)
         return None
+
+
+def _text_chunk(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def extract_metadata_columns(info: ImageInfo) -> tuple[dict, str]:
+    """Map raw chunks to image columns; return (columns, extraction_status) (design §4)."""
+    if info.prompt_text is None and info.workflow_text is None:
+        return {}, "none"
+    meta = comfy_metadata.ExtractedMetadata()
+    if info.prompt_text is not None:
+        try:
+            prompt = json.loads(info.prompt_text)
+            meta = comfy_metadata.extract(prompt)
+        except Exception as exc:  # noqa: BLE001 - 確認事項 #16: unparsable -> partial
+            log.warning("prompt metadata could not be analysed: %s", exc)
+            meta = comfy_metadata.ExtractedMetadata().finalize()
+    else:
+        meta = meta.finalize()
+    columns = {
+        "positive_prompt": meta.positive_prompt,
+        "negative_prompt": meta.negative_prompt,
+        "model_name": meta.model_name,
+        "seed": meta.seed,
+        "steps": meta.steps,
+        "cfg": meta.cfg,
+        "sampler_name": meta.sampler_name,
+        "scheduler": meta.scheduler,
+        "gen_width": meta.gen_width,
+        "gen_height": meta.gen_height,
+    }
+    return columns, meta.status
 
 
 def run_scan(config: AppConfig, conn: sqlite3.Connection) -> ScanRun:
@@ -148,25 +201,32 @@ def _register_new(
     run: ScanRun,
 ) -> int:
     stat = path.stat()
-    size = read_image_size(path)
+    info = read_image_info(path)
+    columns, extraction_status = extract_metadata_columns(info) if info else ({}, "none")
     values = {
         "content_hash": content_hash,
         "file_path": file_path,
         "dir_path": dir_path,
         "file_name": file_name,
         "file_size": stat.st_size,
-        "image_width": size[0] if size else None,
-        "image_height": size[1] if size else None,
+        "image_width": info.width if info else None,
+        "image_height": info.height if info else None,
         "file_mtime": mtime_to_iso(stat.st_mtime),
         "presence": "active",
         "is_favorite": 0,
         "thumbnail_name": None,
         # 確認事項 #7: a PNG Pillow cannot open is registered with thumbnail failed.
-        "thumbnail_status": "pending" if size else "failed",
-        "extraction_status": "none",
+        "thumbnail_status": "pending" if info else "failed",
+        "extraction_status": extraction_status,
+        **columns,
         "created_at": now,
         "updated_at": now,
     }
     image_id = repository.insert_image(conn, values)
     run.created_count += 1
+    if info and (info.prompt_text is not None or info.workflow_text is not None):
+        repository.insert_raw_metadata(conn, image_id, info.prompt_text, info.workflow_text)
+    if extraction_status == "partial":
+        # 確認事項 #3: extract_failed_count = newly registered images left partial.
+        run.extract_failed_count += 1
     return image_id

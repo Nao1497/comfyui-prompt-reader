@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from app.models import Image, ScanRun
+from app.models import Image, RawMetadata, ScanRun
 
 IMAGE_COLUMNS = [
     "id", "content_hash", "file_path", "dir_path", "file_name", "file_size",
@@ -195,3 +195,24 @@ def set_favorite(conn: sqlite3.Connection, image_id: int, is_favorite: bool, now
         (1 if is_favorite else 0, now, image_id),
     )
     return cur.rowcount == 1
+
+
+# --- raw metadata -------------------------------------------------------------
+
+def insert_raw_metadata(
+    conn: sqlite3.Connection, image_id: int, prompt_json: str | None, workflow_json: str | None
+) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO image_raw_metadata (image_id, prompt_json, workflow_json) VALUES (?, ?, ?)",
+        (image_id, prompt_json, workflow_json),
+    )
+
+
+def get_raw_metadata(conn: sqlite3.Connection, image_id: int) -> RawMetadata | None:
+    row = conn.execute(
+        "SELECT image_id, prompt_json, workflow_json FROM image_raw_metadata WHERE image_id = ?",
+        (image_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return RawMetadata(image_id=row["image_id"], prompt_json=row["prompt_json"], workflow_json=row["workflow_json"])
