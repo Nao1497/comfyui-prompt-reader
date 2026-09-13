@@ -9,11 +9,13 @@ import logging
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
 from pydantic import BaseModel, StrictBool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import db, folders, repository, scanner
@@ -21,6 +23,7 @@ from app.config import AppConfig
 from app.models import Image, ScanRun
 
 log = logging.getLogger(__name__)
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 class ApiError(Exception):
@@ -70,6 +73,9 @@ def create_app(config: AppConfig) -> FastAPI:
 
     _register_error_handlers(app)
     _register_routes(app)
+    # 確認事項 #14: the static front end is mounted at "/" after every API route,
+    # so "/" serves index.html and "/app.js" the script without shadowing the API.
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app
 
 

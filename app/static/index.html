@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ComfyUI Prompt Reader</title>
+<style>
+  :root {
+    --cell: 160px;
+    --bg: #1e1f22; --panel: #26272b; --border: #3a3b40; --text: #e6e6e6; --muted: #9a9ba1; --accent: #4f8cff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; grid-template-columns: 240px 1fr 380px; grid-template-rows: 100vh;
+    background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .pane { overflow: auto; min-height: 0; }
+  #left { background: var(--panel); border-right: 1px solid var(--border); padding: 12px; }
+  #right { background: var(--panel); border-left: 1px solid var(--border); padding: 12px; }
+  #center { display: flex; flex-direction: column; }
+  #toolbar { display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  #toolbar .muted { color: var(--muted); }
+  #grid-wrap { flex: 1; overflow: auto; padding: 12px; }
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--cell), 1fr)); gap: 8px; }
+  .cell {
+    aspect-ratio: 1 / 1; display: flex; align-items: center; justify-content: center;
+    background: #141517; border: 2px solid transparent; border-radius: 4px; cursor: pointer; overflow: hidden; position: relative;
+  }
+  .cell.selected { border-color: var(--accent); }
+  /* FR-39 / AC-27: never enlarge beyond the thumbnail's own resolution. */
+  .cell img { max-width: 100%; max-height: 100%; width: auto; height: auto; display: block; }
+  .cell .badge { position: absolute; left: 4px; top: 4px; font-size: 11px; padding: 1px 4px; border-radius: 3px; background: rgba(0,0,0,.6); color: var(--muted); }
+  .cell .fav { position: absolute; right: 4px; top: 2px; color: #ffcc33; font-size: 14px; }
+  .cell .noimg { color: var(--muted); font-size: 11px; text-align: center; padding: 6px; word-break: break-all; }
+  #sentinel { height: 1px; }
+  #status { padding: 6px 12px; color: var(--muted); border-top: 1px solid var(--border); }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 12px 0 6px; }
+  .placeholder { color: var(--muted); }
+</style>
+</head>
+<body>
+  <aside id="left" class="pane">
+    <h2>絞り込み</h2>
+    <div class="placeholder">（TASK-21 で実装）</div>
+  </aside>
+
+  <main id="center" class="pane">
+    <div id="toolbar">
+      <span id="filter-label">すべて</span>
+      <span id="total" class="muted"></span>
+    </div>
+    <div id="grid-wrap">
+      <div id="grid"></div>
+      <div id="sentinel"></div>
+    </div>
+    <div id="status"></div>
+  </main>
+
+  <aside id="right" class="pane">
+    <h2>詳細</h2>
+    <div id="detail" class="placeholder">画像を選択してください（TASK-22 で実装）</div>
+  </aside>
+
+  <script src="app.js"></script>
+</body>
+</html>
