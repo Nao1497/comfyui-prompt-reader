@@ -148,6 +148,100 @@
   }, { root: $('#grid-wrap'), rootMargin: '400px 0px' });
   observer.observe(sentinel);
 
+  // --- left pane: scan button, fixed items, folder tree ---------------------
+  const scanBtn = $('#scan-btn');
+  const scanResult = $('#scan-result');
+  const fixedItems = $('#fixed-items');
+  const folderTree = $('#folder-tree');
+  const recursiveBox = $('#recursive');
+  const filterLabel = $('#filter-label');
+
+  async function refreshFolders() {
+    try {
+      const body = await apiGet('/folders');
+      fixedItems.querySelector('[data-count="all"]').textContent = body.rootTotalCount;
+      fixedItems.querySelector('[data-count="favorite"]').textContent = body.favoriteCount;
+      fixedItems.querySelector('[data-count="missing"]').textContent = body.missingCount;
+      folderTree.replaceChildren(...body.folders.map(renderFolder));
+      highlightSelection();
+    } catch (err) {
+      statusEl.textContent = `フォルダ取得エラー: ${err.message}`;
+    }
+  }
+
+  function renderFolder(node) {
+    const li = document.createElement('li');
+    const row = document.createElement('div');
+    row.className = 'item';
+    row.dataset.dir = node.path;
+    row.title = node.path;
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = node.name;
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = node.totalCount; // 確認事項 #10(c): show totalCount
+    row.append(label, count);
+    row.addEventListener('click', () => selectFolder(node.path));
+    li.appendChild(row);
+    if (node.children.length) {
+      const ul = document.createElement('ul');
+      ul.append(...node.children.map(renderFolder));
+      li.appendChild(ul);
+    }
+    return li;
+  }
+
+  function selectFixed(kind) {
+    filterLabel.textContent = { all: 'すべて', favorite: 'お気に入り', missing: '見つからない' }[kind];
+    setFilter({ kind, dir: null });
+    highlightSelection();
+  }
+
+  function selectFolder(dir) {
+    filterLabel.textContent = dir;
+    setFilter({ kind: 'all', dir, recursive: recursiveBox.checked });
+    highlightSelection();
+  }
+
+  function highlightSelection() {
+    const f = state.filter;
+    for (const el of document.querySelectorAll('#left .item')) {
+      const isFixed = el.dataset.kind !== undefined;
+      const on = f.dir === null ? (isFixed && el.dataset.kind === f.kind) : (!isFixed && el.dataset.dir === f.dir);
+      el.classList.toggle('selected', on);
+    }
+  }
+
+  fixedItems.addEventListener('click', (ev) => {
+    const li = ev.target.closest('.item');
+    if (li) selectFixed(li.dataset.kind);
+  });
+
+  recursiveBox.addEventListener('change', () => {
+    if (state.filter.dir !== null) setFilter({ recursive: recursiveBox.checked });
+  });
+
+  scanBtn.addEventListener('click', async () => {
+    scanBtn.disabled = true;
+    scanResult.textContent = 'スキャン中…';
+    try {
+      const res = await fetch('/scan', { method: 'POST' });
+      const body = await res.json();
+      if (!res.ok) throw new Error(`${body.error.code}: ${body.error.message}`);
+      scanResult.textContent =
+        `走査 ${body.scannedCount} / 新規 ${body.createdCount} / 更新 ${body.updatedCount} / ` +
+        `missing ${body.missingCount} / 抽出失敗 ${body.extractFailedCount}\n` +
+        `サムネイル生成 ${body.thumbnailGeneratedCount} / 失敗 ${body.thumbnailFailedCount}`;
+      await refreshFolders();
+      resetAndLoad();
+    } catch (err) {
+      scanResult.textContent = `エラー: ${err.message}`;
+    } finally {
+      scanBtn.disabled = false;
+    }
+  });
+
   // --- cell size slider (FR-39) ---------------------------------------------
   const slider = $('#cell-slider');
   const cellValue = $('#cell-value');
@@ -174,8 +268,9 @@
     applyCellSize(initial);
   }
 
-  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize };
+  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize, refreshFolders, selectFolder, selectFixed };
 
   initCellSize();
+  refreshFolders();
   resetAndLoad();
 })();

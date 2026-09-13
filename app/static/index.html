@@ -39,12 +39,37 @@
   #status { padding: 6px 12px; color: var(--muted); border-top: 1px solid var(--border); }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 12px 0 6px; }
   .placeholder { color: var(--muted); }
+  .muted { color: var(--muted); }
+  button { background: #33353b; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; cursor: pointer; font: inherit; }
+  button:hover { background: #3d3f46; }
+  button:disabled { opacity: .5; cursor: default; }
+  #scan-btn { width: 100%; }
+  #scan-result { margin-top: 6px; font-size: 12px; white-space: pre-line; }
+  ul.tree { list-style: none; margin: 0; padding: 0; }
+  ul.tree ul { list-style: none; margin: 0; padding-left: 14px; }
+  .item { display: flex; justify-content: space-between; gap: 6px; padding: 3px 6px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+  .item:hover { background: #33353b; }
+  .item.selected { background: var(--accent); color: #fff; }
+  .item .label { overflow: hidden; text-overflow: ellipsis; }
+  .item .count { color: var(--muted); font-size: 11px; }
+  .item.selected .count { color: #e8f0ff; }
 </style>
 </head>
 <body>
   <aside id="left" class="pane">
-    <h2>絞り込み</h2>
-    <div class="placeholder">（TASK-21 で実装）</div>
+    <button id="scan-btn" type="button">スキャン実行</button>
+    <div id="scan-result" class="muted"></div>
+
+    <h2>表示</h2>
+    <ul id="fixed-items" class="tree">
+      <li class="item selected" data-kind="all"><span class="label">すべて</span><span class="count" data-count="all"></span></li>
+      <li class="item" data-kind="favorite"><span class="label">お気に入り</span><span class="count" data-count="favorite"></span></li>
+      <li class="item" data-kind="missing"><span class="label">見つからない</span><span class="count" data-count="missing"></span></li>
+    </ul>
+
+    <h2>フォルダ</h2>
+    <label class="muted"><input type="checkbox" id="recursive" checked> サブフォルダを含む</label>
+    <ul id="folder-tree" class="tree"></ul>
   </aside>
 
   <main id="center" class="pane">
