@@ -242,6 +242,195 @@
     }
   });
 
+  // --- right pane: detail view (design §9) ----------------------------------
+  const detailEl = $('#detail');
+  let currentDetail = null;
+
+  document.addEventListener('image-selected', (ev) => loadDetail(ev.detail.id));
+
+  async function loadDetail(id) {
+    detailEl.classList.remove('placeholder');
+    detailEl.textContent = '読み込み中…';
+    try {
+      const body = await apiGet(`/images/${id}`);
+      if (state.selectedId !== id) return;
+      currentDetail = body;
+      renderDetail(body);
+    } catch (err) {
+      detailEl.textContent = `エラー: ${err.message}`;
+    }
+  }
+
+  function el(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === 'class') node.className = v;
+      else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+      else node.setAttribute(k, v);
+    }
+    for (const c of children) node.append(c);
+    return node;
+  }
+
+  function fmtBytes(n) {
+    if (n === null || n === undefined) return '';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(2)} MB`;
+  }
+
+  function fmtValue(v) {
+    return v === null || v === undefined ? el('span', { class: 'muted' }, '未取得') : String(v);
+  }
+
+  function kvTable(rows) {
+    const table = el('table', { class: 'kv' });
+    for (const [k, v] of rows) {
+      table.appendChild(el('tr', {}, el('th', {}, k), el('td', {}, v instanceof Node ? v : String(v))));
+    }
+    return table;
+  }
+
+  function renderDetail(d) {
+    const g = d.generation;
+    const frag = document.createDocumentFragment();
+
+    // Original image: fetched only here, never in the grid (design §1).
+    const preview = el('div', { id: 'preview' });
+    if (d.presence === 'missing') {
+      preview.appendChild(el('div', { class: 'noimg muted' }, 'ファイルが見つかりません（missing）'));
+    } else {
+      const img = el('img', { src: d.fileUrl, alt: d.fileName });
+      img.addEventListener('error', () => {
+        preview.replaceChildren(el('div', { class: 'noimg muted' }, '原寸画像を取得できません'));
+      });
+      preview.appendChild(img);
+    }
+    frag.appendChild(preview);
+
+    const favBtn = el('button', { id: 'fav-btn', type: 'button', class: d.isFavorite ? 'on' : '', onclick: () => toggleFavorite(d) },
+      d.isFavorite ? '★ お気に入り' : '☆ お気に入り');
+    frag.appendChild(el('div', { class: 'detail-head' }, el('span', { class: 'name', title: d.fileName }, d.fileName), favBtn));
+
+    frag.appendChild(el('h2', {}, 'ファイル情報'));
+    frag.appendChild(kvTable([
+      ['ファイル名', d.fileName],
+      ['パス', d.filePath],
+      ['サイズ', fmtBytes(d.fileSize)],
+      ['解像度', d.imageWidth !== null ? `${d.imageWidth} × ${d.imageHeight}` : fmtValue(null)],
+      ['更新日時', d.fileMtime],
+      ['状態', d.presence],
+    ]));
+
+    if (d.extractionStatus !== 'full') {
+      const notice = el('div', { class: 'notice' });
+      if (d.extractionStatus === 'none') {
+        notice.append('ComfyUI メタデータがありません。生成パラメータとプロンプトは取得できませんでした。');
+      } else {
+        notice.append('一部の項目を抽出できませんでした（partial）。取得できなかった項目は「未取得」と表示されます。 ');
+        notice.appendChild(el('a', { href: `/images/${d.id}/raw-metadata`, target: '_blank' }, '生メタデータを開く'));
+      }
+      frag.appendChild(notice);
+    }
+
+    frag.appendChild(el('h2', {}, '生成パラメータ'));
+    frag.appendChild(kvTable([
+      ['モデル', fmtValue(g.modelName)],
+      ['seed', fmtValue(g.seed)],
+      ['steps', fmtValue(g.steps)],
+      ['cfg', fmtValue(g.cfg)],
+      ['sampler', fmtValue(g.samplerName)],
+      ['scheduler', fmtValue(g.scheduler)],
+      ['生成解像度', g.genWidth !== null && g.genHeight !== null ? `${g.genWidth} × ${g.genHeight}` : fmtValue(null)],
+      ['抽出状態', d.extractionStatus],
+    ]));
+
+    frag.appendChild(promptBlock('Positive', g.positivePrompt, 'positive'));
+    frag.appendChild(promptBlock('Negative', g.negativePrompt, 'negative'));
+    if (d.extractionStatus === 'full') {
+      frag.appendChild(el('div', {}, el('a', { href: `/images/${d.id}/raw-metadata`, target: '_blank' }, '生メタデータを開く')));
+    }
+    detailEl.replaceChildren(frag);
+  }
+
+  /** Copy button hands the API string itself to the clipboard; the <pre> is display only (FR-9). */
+  function promptBlock(title, text, key) {
+    const status = el('span', { class: 'copied' });
+    const btn = el('button', { type: 'button', class: 'copy-btn', 'data-copy': key, disabled: text === null ? '' : null }, 'コピー');
+    if (text !== null) btn.removeAttribute('disabled');
+    btn.addEventListener('click', async () => {
+      if (text === null) return;
+      const ok = await copyText(text);
+      status.textContent = ok ? 'コピーしました' : 'コピーできませんでした';
+      setTimeout(() => { status.textContent = ''; }, 1500);
+    });
+    const pre = el('pre', { class: 'prompt' + (text === null ? ' empty' : '') }, text === null ? '未取得' : text);
+    return el('div', { class: 'prompt-block' },
+      el('div', { class: 'prompt-head' }, el('span', { class: 'title' }, title), el('span', {}, btn, status)),
+      pre);
+  }
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function toggleFavorite(d) {
+    const next = !d.isFavorite;
+    try {
+      const res = await fetch(`/images/${d.id}/favorite`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ is_favorite: next }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(`${body.error.code}: ${body.error.message}`);
+      d.isFavorite = body.isFavorite;
+      const item = state.items.find((i) => i.id === d.id);
+      if (item) item.isFavorite = body.isFavorite;
+      updateCellFavorite(d.id, body.isFavorite);
+      if (state.selectedId === d.id) renderDetail(d);
+      refreshFolders();
+    } catch (err) {
+      statusEl.textContent = `お気に入り更新エラー: ${err.message}`;
+    }
+  }
+
+  function updateCellFavorite(id, on) {
+    const cell = grid.querySelector(`.cell[data-id="${id}"]`);
+    if (!cell) return;
+    if (state.filter.kind === 'favorite' && !on) {
+      cell.remove();
+      state.items = state.items.filter((i) => i.id !== id);
+      if (state.totalCount !== null) { state.totalCount -= 1; totalEl.textContent = `${state.totalCount} 件`; }
+      return;
+    }
+    const existing = cell.querySelector('.fav');
+    if (on && !existing) {
+      const fav = document.createElement('span');
+      fav.className = 'fav';
+      fav.textContent = '★';
+      cell.appendChild(fav);
+    } else if (!on && existing) {
+      existing.remove();
+    }
+  }
+
   // --- cell size slider (FR-39) ---------------------------------------------
   const slider = $('#cell-slider');
   const cellValue = $('#cell-value');
@@ -268,7 +457,7 @@
     applyCellSize(initial);
   }
 
-  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize, refreshFolders, selectFolder, selectFixed };
+  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize, refreshFolders, selectFolder, selectFixed, getDetail: () => currentDetail };
 
   initCellSize();
   refreshFolders();

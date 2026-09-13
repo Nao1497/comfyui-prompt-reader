@@ -53,6 +53,25 @@
   .item .label { overflow: hidden; text-overflow: ellipsis; }
   .item .count { color: var(--muted); font-size: 11px; }
   .item.selected .count { color: #e8f0ff; }
+  /* right pane */
+  #preview { width: 100%; background: #141517; border-radius: 4px; display: flex; justify-content: center; margin-bottom: 8px; }
+  #preview img { max-width: 100%; max-height: 320px; width: auto; height: auto; display: block; }
+  #preview .noimg { padding: 24px; }
+  .detail-head { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .detail-head .name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #fav-btn.on { color: #ffcc33; border-color: #ffcc33; }
+  table.kv { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  table.kv th { text-align: left; color: var(--muted); font-weight: normal; width: 34%; padding: 2px 6px 2px 0; vertical-align: top; }
+  table.kv td { padding: 2px 0; word-break: break-all; }
+  .notice { background: #3a3320; border: 1px solid #6b5a1e; color: #f0d78c; padding: 6px 8px; border-radius: 4px; margin-bottom: 8px; font-size: 12px; }
+  .notice a { color: #ffd966; }
+  .prompt-block { margin-bottom: 10px; }
+  .prompt-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .prompt-head .title { color: var(--muted); }
+  pre.prompt { margin: 0; padding: 8px; background: #141517; border: 1px solid var(--border); border-radius: 4px; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 240px; overflow: auto; }
+  pre.prompt.empty { color: var(--muted); font-style: italic; }
+  .copied { color: #7fd48a; font-size: 11px; margin-left: 6px; }
+  a { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -91,7 +110,7 @@
 
   <aside id="right" class="pane">
     <h2>詳細</h2>
-    <div id="detail" class="placeholder">画像を選択してください（TASK-22 で実装）</div>
+    <div id="detail" class="placeholder">画像を選択してください</div>
   </aside>
 
   <script src="app.js"></script>
