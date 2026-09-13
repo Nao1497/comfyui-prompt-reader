@@ -115,6 +115,21 @@ def _list_where(filters: dict[str, Any]) -> tuple[str, list[Any]]:
     if lora_id is not None:
         clauses.append("id IN (SELECT image_id FROM image_loras WHERE lora_id = ?)")
         params.append(lora_id)
+    tag_ids = list(dict.fromkeys(filters.get("tags") or []))
+    if tag_ids:
+        ph = ", ".join("?" * len(tag_ids))
+        if filters.get("tag_match", "and") == "or":
+            clauses.append(f"id IN (SELECT image_id FROM image_tags WHERE tag_id IN ({ph}))")
+            params.extend(tag_ids)
+        else:
+            # FR-50 "すべて含む": start from the tag index and keep images hit by every tag
+            # (design §9: GROUP BY/HAVING beats a chain of EXISTS by an order of magnitude).
+            clauses.append(
+                f"id IN (SELECT image_id FROM image_tags WHERE tag_id IN ({ph})"
+                f" GROUP BY image_id HAVING COUNT(DISTINCT tag_id) = ?)"
+            )
+            params.extend(tag_ids)
+            params.append(len(tag_ids))
     dir_path = filters.get("dir")
     recursive = filters.get("recursive", True)
     if dir_path is not None:
@@ -568,3 +583,30 @@ def list_used_tags(conn: sqlite3.Connection, limit: int) -> list[Tag]:
         (limit,),
     ).fetchall()
     return [_row_to_tag(r) for r in rows]
+
+
+def resolve_prompt_tokens(conn: sqlite3.Connection, image_id: int) -> list[tuple[str, Tag | None]]:
+    """Positive prompt words in order, each with its dictionary tag (name first, then alias)."""
+    tokens = get_prompt_tokens(conn, image_id, "positive")
+    if not tokens:
+        return []
+    distinct = list(dict.fromkeys(tokens))
+    found: dict[str, Tag] = {}
+    for chunk in range(0, len(distinct), 500):
+        part = distinct[chunk:chunk + 500]
+        ph = ", ".join("?" * len(part))
+        for row in conn.execute(_TAG_SELECT + f" WHERE t.name_normalized IN ({ph})", part):
+            found[row["name_normalized"]] = _row_to_tag(row)
+        rest = [t for t in part if t not in found]
+        if rest:
+            ph = ", ".join("?" * len(rest))
+            for row in conn.execute(
+                "SELECT a.alias_normalized AS alias, " + ", ".join("t." + c for c in TAG_COLUMNS)
+                + ", (SELECT COUNT(*) FROM image_tags it JOIN images i ON i.id = it.image_id"
+                + "    WHERE it.tag_id = t.id AND i.presence = 'active') AS image_count"
+                + f" FROM tag_aliases a JOIN tags t ON t.id = a.tag_id WHERE a.alias_normalized IN ({ph})"
+                + " ORDER BY t.post_count DESC",
+                rest,
+            ):
+                found.setdefault(row["alias"], _row_to_tag(row))
+    return [(t, found.get(t)) for t in tokens]

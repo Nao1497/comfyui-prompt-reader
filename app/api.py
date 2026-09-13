@@ -245,7 +245,9 @@ def image_lora_to_json(row: sqlite3.Row) -> dict:
     }
 
 
-def image_to_json(img: Image, loras: list[dict] | None = None) -> dict:
+def image_to_json(
+    img: Image, loras: list[dict] | None = None, prompt_tokens: list[dict] | None = None
+) -> dict:
     return {
         "id": img.id,
         "fileName": img.file_name,
@@ -275,6 +277,7 @@ def image_to_json(img: Image, loras: list[dict] | None = None) -> dict:
             "genHeight": img.gen_height,
         },
         "loras": loras or [],
+        "promptTokens": prompt_tokens or [],
     }
 
 
@@ -430,6 +433,8 @@ def _register_routes(app: FastAPI) -> None:
         dir: str | None = None,
         recursive: bool = True,
         lora: int | None = None,
+        tag: list[int] | None = Query(None),
+        tag_match: str = Query("and", pattern="^(and|or)$"),
     ):
         # 確認事項 #10(a): missing_only is an addition for the "見つからない" pane.
         # 確認事項 #8: dir omitted -> no folder filter; dir="" -> root (see repository).
@@ -440,6 +445,8 @@ def _register_routes(app: FastAPI) -> None:
             "dir": dir.strip("/") if dir is not None else None,
             "recursive": recursive,
             "lora": lora,
+            "tags": tag,
+            "tag_match": tag_match,
         }
         decoded = decode_cursor(cursor) if cursor is not None else None
         with with_db(request) as conn:
@@ -457,9 +464,13 @@ def _register_routes(app: FastAPI) -> None:
         with with_db(request) as conn:
             img = repository.get_image(conn, image_id)
             loras = repository.get_image_loras(conn, image_id) if img else []
+            resolved = repository.resolve_prompt_tokens(conn, image_id) if img else []
         if img is None:
             raise not_found()
-        return image_to_json(img, [image_lora_to_json(r) for r in loras])
+        prompt_tokens_json = [
+            {"token": token, "tag": tag_to_json(tag) if tag else None} for token, tag in resolved
+        ]
+        return image_to_json(img, [image_lora_to_json(r) for r in loras], prompt_tokens_json)
 
     @app.get("/images/{image_id}/thumbnail")
     def get_thumbnail(request: Request, image_id: int):
