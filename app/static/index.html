@@ -33,7 +33,14 @@
   /* FR-39 / AC-27: never enlarge beyond the thumbnail's own resolution. */
   .cell img { max-width: 100%; max-height: 100%; width: auto; height: auto; display: block; }
   .cell .badge { position: absolute; left: 4px; top: 4px; font-size: 11px; padding: 1px 4px; border-radius: 3px; background: rgba(0,0,0,.6); color: var(--muted); }
-  .cell .fav { position: absolute; right: 4px; top: 2px; color: #ffcc33; font-size: 14px; }
+  .cell .fav {
+    position: absolute; right: 4px; top: 4px; width: 24px; height: 24px; padding: 0; line-height: 22px;
+    border-radius: 50%; border: 1px solid rgba(255,255,255,.25); background: rgba(0,0,0,.55);
+    color: #ddd; font-size: 15px; text-align: center; cursor: pointer; opacity: 0; transition: opacity .12s;
+  }
+  .cell:hover .fav, .cell .fav.on { opacity: 1; }
+  .cell .fav.on { color: #ffcc33; border-color: #ffcc33; }
+  .cell .fav:hover { background: rgba(0,0,0,.8); }
   .cell .noimg { color: var(--muted); font-size: 11px; text-align: center; padding: 6px; word-break: break-all; }
   #sentinel { height: 1px; }
   #status { padding: 6px 12px; color: var(--muted); border-top: 1px solid var(--border); }

@@ -124,12 +124,19 @@
       badge.textContent = 'missing';
       cell.appendChild(badge);
     }
-    if (item.isFavorite) {
-      const fav = document.createElement('span');
-      fav.className = 'fav';
-      fav.textContent = '★';
-      cell.appendChild(fav);
-    }
+    // Favorite toggle at the top-right of every cell.
+    const fav = document.createElement('button');
+    fav.type = 'button';
+    fav.className = 'fav' + (item.isFavorite ? ' on' : '');
+    fav.textContent = item.isFavorite ? '★' : '☆';
+    fav.title = 'お気に入り';
+    fav.setAttribute('aria-pressed', String(item.isFavorite));
+    fav.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const current = state.items.find((i) => i.id === item.id);
+      setFavorite(item.id, !(current ? current.isFavorite : item.isFavorite));
+    });
+    cell.appendChild(fav);
     cell.addEventListener('click', () => selectImage(item.id));
     return cell;
   }
@@ -392,19 +399,25 @@
     }
   }
 
-  async function toggleFavorite(d) {
-    const next = !d.isFavorite;
+  function toggleFavorite(d) {
+    return setFavorite(d.id, !d.isFavorite);
+  }
+
+  /** PUT the new favorite state, then sync the grid cell, the detail pane and the counts. */
+  async function setFavorite(id, next) {
     try {
-      const res = await fetch(`/images/${d.id}/favorite`, {
+      const res = await fetch(`/images/${id}/favorite`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ is_favorite: next }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(`${body.error.code}: ${body.error.message}`);
-      d.isFavorite = body.isFavorite;
-      const item = state.items.find((i) => i.id === d.id);
+      const item = state.items.find((i) => i.id === id);
       if (item) item.isFavorite = body.isFavorite;
-      updateCellFavorite(d.id, body.isFavorite);
-      if (state.selectedId === d.id) renderDetail(d);
+      updateCellFavorite(id, body.isFavorite);
+      if (currentDetail && currentDetail.id === id) {
+        currentDetail.isFavorite = body.isFavorite;
+        if (state.selectedId === id) renderDetail(currentDetail);
+      }
       refreshFolders();
     } catch (err) {
       statusEl.textContent = `お気に入り更新エラー: ${err.message}`;
@@ -420,15 +433,11 @@
       if (state.totalCount !== null) { state.totalCount -= 1; totalEl.textContent = `${state.totalCount} 件`; }
       return;
     }
-    const existing = cell.querySelector('.fav');
-    if (on && !existing) {
-      const fav = document.createElement('span');
-      fav.className = 'fav';
-      fav.textContent = '★';
-      cell.appendChild(fav);
-    } else if (!on && existing) {
-      existing.remove();
-    }
+    const fav = cell.querySelector('.fav');
+    if (!fav) return;
+    fav.classList.toggle('on', on);
+    fav.textContent = on ? '★' : '☆';
+    fav.setAttribute('aria-pressed', String(on));
   }
 
   // --- cell size slider (FR-39) ---------------------------------------------
