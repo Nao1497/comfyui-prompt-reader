@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ComfyUI Prompt Reader</title>
+<style>
+  :root {
+    --cell: 160px;
+    --bg: #1e1f22; --panel: #26272b; --border: #3a3b40; --text: #e6e6e6; --muted: #9a9ba1; --accent: #4f8cff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; grid-template-columns: 240px 1fr 380px; grid-template-rows: 100vh;
+    background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .pane { overflow: auto; min-height: 0; }
+  #left { background: var(--panel); border-right: 1px solid var(--border); padding: 12px; }
+  #right { background: var(--panel); border-left: 1px solid var(--border); padding: 12px; }
+  #center { display: flex; flex-direction: column; }
+  #toolbar { display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  #toolbar .muted { color: var(--muted); }
+  #cell-size { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  #cell-slider { width: 160px; }
+  #grid-wrap { flex: 1; overflow: auto; padding: 12px; }
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--cell), 1fr)); gap: 8px; }
+  .cell {
+    aspect-ratio: 1 / 1; display: flex; align-items: center; justify-content: center;
+    background: #141517; border: 2px solid transparent; border-radius: 4px; cursor: pointer; overflow: hidden; position: relative;
+  }
+  .cell.selected { border-color: var(--accent); }
+  /* FR-39 / AC-27: never enlarge beyond the thumbnail's own resolution. */
+  .cell img { max-width: 100%; max-height: 100%; width: auto; height: auto; display: block; }
+  .cell .badge { position: absolute; left: 4px; top: 4px; font-size: 11px; padding: 1px 4px; border-radius: 3px; background: rgba(0,0,0,.6); color: var(--muted); }
+  .cell .fav { position: absolute; right: 4px; top: 2px; color: #ffcc33; font-size: 14px; }
+  .cell .noimg { color: var(--muted); font-size: 11px; text-align: center; padding: 6px; word-break: break-all; }
+  #sentinel { height: 1px; }
+  #status { padding: 6px 12px; color: var(--muted); border-top: 1px solid var(--border); }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 12px 0 6px; }
+  .placeholder { color: var(--muted); }
+  .muted { color: var(--muted); }
+  button { background: #33353b; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; cursor: pointer; font: inherit; }
+  button:hover { background: #3d3f46; }
+  button:disabled { opacity: .5; cursor: default; }
+  #scan-btn { width: 100%; }
+  #scan-result { margin-top: 6px; font-size: 12px; white-space: pre-line; }
+  ul.tree { list-style: none; margin: 0; padding: 0; }
+  ul.tree ul { list-style: none; margin: 0; padding-left: 14px; }
+  .item { display: flex; justify-content: space-between; gap: 6px; padding: 3px 6px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+  .item:hover { background: #33353b; }
+  .item.selected { background: var(--accent); color: #fff; }
+  .item .label { overflow: hidden; text-overflow: ellipsis; }
+  .item .count { color: var(--muted); font-size: 11px; }
+  .item.selected .count { color: #e8f0ff; }
+  /* right pane */
+  #preview { width: 100%; background: #141517; border-radius: 4px; display: flex; justify-content: center; margin-bottom: 8px; }
+  #preview img { max-width: 100%; max-height: 320px; width: auto; height: auto; display: block; }
+  #preview .noimg { padding: 24px; }
+  .detail-head { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .detail-head .name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #fav-btn.on { color: #ffcc33; border-color: #ffcc33; }
+  table.kv { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  table.kv th { text-align: left; color: var(--muted); font-weight: normal; width: 34%; padding: 2px 6px 2px 0; vertical-align: top; }
+  table.kv td { padding: 2px 0; word-break: break-all; }
+  .notice { background: #3a3320; border: 1px solid #6b5a1e; color: #f0d78c; padding: 6px 8px; border-radius: 4px; margin-bottom: 8px; font-size: 12px; }
+  .notice a { color: #ffd966; }
+  .prompt-block { margin-bottom: 10px; }
+  .prompt-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .prompt-head .title { color: var(--muted); }
+  pre.prompt { margin: 0; padding: 8px; background: #141517; border: 1px solid var(--border); border-radius: 4px; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 240px; overflow: auto; }
+  pre.prompt.empty { color: var(--muted); font-style: italic; }
+  .copied { color: #7fd48a; font-size: 11px; margin-left: 6px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <aside id="left" class="pane">
+    <button id="scan-btn" type="button">スキャン実行</button>
+    <div id="scan-result" class="muted"></div>
+
+    <h2>表示</h2>
+    <ul id="fixed-items" class="tree">
+      <li class="item selected" data-kind="all"><span class="label">すべて</span><span class="count" data-count="all"></span></li>
+      <li class="item" data-kind="favorite"><span class="label">お気に入り</span><span class="count" data-count="favorite"></span></li>
+      <li class="item" data-kind="missing"><span class="label">見つからない</span><span class="count" data-count="missing"></span></li>
+    </ul>
+
+    <h2>フォルダ</h2>
+    <label class="muted"><input type="checkbox" id="recursive" checked> サブフォルダを含む</label>
+    <ul id="folder-tree" class="tree"></ul>
+  </aside>
+
+  <main id="center" class="pane">
+    <div id="toolbar">
+      <span id="filter-label">すべて</span>
+      <span id="total" class="muted"></span>
+      <label id="cell-size" title="サムネイル表示サイズ">
+        <span class="muted">サイズ</span>
+        <input id="cell-slider" type="range" min="96" max="320" step="8" value="160">
+        <span id="cell-value" class="muted">160px</span>
+      </label>
+    </div>
+    <div id="grid-wrap">
+      <div id="grid"></div>
+      <div id="sentinel"></div>
+    </div>
+    <div id="status"></div>
+  </main>
+
+  <aside id="right" class="pane">
+    <h2>詳細</h2>
+    <div id="detail" class="placeholder">画像を選択してください</div>
+  </aside>
+
+  <script src="app.js"></script>
+</body>
+</html>
