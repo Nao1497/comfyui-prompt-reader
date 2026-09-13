@@ -11,16 +11,18 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request
+import io
+
+from fastapi import FastAPI, File, Query, Request, UploadFile
 from pydantic import BaseModel, StrictBool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import db, folders, lora_scanner, repository, scanner
+from app import db, folders, lora_scanner, prompt_tokens, repository, scanner, tag_importer
 from app.config import AppConfig
-from app.models import Image, Lora, ScanRun
+from app.models import Image, Lora, ScanRun, Tag, TagImport
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -197,6 +199,41 @@ def lora_to_json(lora: Lora) -> dict:
     }
 
 
+def tag_to_json(tag: Tag, lora_name: str | None = None) -> dict:
+    return {
+        "id": tag.id,
+        "name": tag.name,
+        "nameNormalized": tag.name_normalized,
+        "category": tag.category,
+        "categoryName": tag.category_name,
+        "postCount": tag.post_count,
+        "tagCreatedAt": tag.tag_created_at,
+        "aliases": tag.aliases,
+        "otherNames": tag.other_names,
+        "postsUrl": tag.posts_url,
+        "wikiUrl": tag.wiki_url,
+        "hasWiki": tag.has_wiki,
+        "source": tag.source,
+        "loraId": tag.lora_id,
+        "loraName": lora_name,
+        "imageCount": tag.image_count,
+    }
+
+
+def tag_import_to_json(run: TagImport) -> dict:
+    return {
+        "tagImportId": run.id,
+        "startedAt": run.started_at,
+        "finishedAt": run.finished_at,
+        "fileName": run.file_name,
+        "readCount": run.read_count,
+        "importedCount": run.imported_count,
+        "skippedCount": run.skipped_count,
+        "aliasCount": run.alias_count,
+        "linkedImageCount": run.linked_image_count,
+    }
+
+
 def image_lora_to_json(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
@@ -208,7 +245,9 @@ def image_lora_to_json(row: sqlite3.Row) -> dict:
     }
 
 
-def image_to_json(img: Image, loras: list[dict] | None = None) -> dict:
+def image_to_json(
+    img: Image, loras: list[dict] | None = None, prompt_tokens: list[dict] | None = None
+) -> dict:
     return {
         "id": img.id,
         "fileName": img.file_name,
@@ -238,6 +277,7 @@ def image_to_json(img: Image, loras: list[dict] | None = None) -> dict:
             "genHeight": img.gen_height,
         },
         "loras": loras or [],
+        "promptTokens": prompt_tokens or [],
     }
 
 
@@ -260,6 +300,59 @@ def _register_routes(app: FastAPI) -> None:
             "thumbnailMaxEdge": config.thumbnail_max_edge,
             "loraRootConfigured": config.lora_root is not None,
         }
+
+    # --- Tag dictionary (FR-45) ------------------------------------------------
+
+    @app.post("/tags/import")
+    def post_tags_import(request: Request, file: UploadFile = File(...)):
+        """Replace the CSV-sourced dictionary with the uploaded danbooru tag CSV."""
+        config: AppConfig = request.app.state.config
+        scan_lock: threading.Lock = request.app.state.scan_lock
+        if file.size is not None and file.size > tag_importer.MAX_TAG_CSV_BYTES:
+            raise ApiError(400, "VALIDATION_ERROR", "tag csv is too large")
+        if not scan_lock.acquire(blocking=False):
+            raise ApiError(409, "SCAN_IN_PROGRESS", "a scan is already running")
+        try:
+            conn = db.connect(config.db_path)
+            try:
+                stream = io.TextIOWrapper(file.file, encoding="utf-8-sig", newline="")
+                run = tag_importer.run_import(conn, stream, file.filename)
+            except tag_importer.InvalidTagCsv as exc:
+                raise ApiError(400, "INVALID_TAG_CSV", str(exc)) from exc
+            finally:
+                conn.close()
+            return tag_import_to_json(run)
+        finally:
+            scan_lock.release()
+
+    @app.get("/tags/search")
+    def get_tags_search(
+        request: Request,
+        q: str = "",
+        limit: int = Query(50, ge=1, le=200),
+        category: int | None = None,
+        source: str | None = None,
+    ):
+        """FR-51: search every column. The query is normalised like a prompt word first."""
+        query = prompt_tokens.normalize_name(q)
+        with with_db(request) as conn:
+            tags = repository.search_tags(conn, query, limit, category, source)
+        return {"items": [tag_to_json(t) for t in tags]}
+
+    @app.get("/tags/used")
+    def get_tags_used(request: Request, limit: int = Query(200, ge=1, le=1000)):
+        with with_db(request) as conn:
+            tags = repository.list_used_tags(conn, limit)
+        return {"items": [tag_to_json(t) for t in tags]}
+
+    @app.get("/tags/{tag_id}")
+    def get_tag(request: Request, tag_id: int):
+        with with_db(request) as conn:
+            tag = repository.get_tag(conn, tag_id)
+            lora = repository.get_lora(conn, tag.lora_id) if tag and tag.lora_id else None
+        if tag is None:
+            raise not_found("tag not found")
+        return tag_to_json(tag, lora.name if lora else None)
 
     # --- LoRA management (FR-41) ---------------------------------------------
 
@@ -305,8 +398,12 @@ def _register_routes(app: FastAPI) -> None:
     @app.put("/loras/{lora_id}")
     def put_lora(request: Request, lora_id: int, body: LoraNotesBody):
         """Edit trigger words / memo. File fields come only from the scan."""
+        now = scanner.utc_now()
         with with_db(request) as conn:
-            ok = repository.update_lora_notes(conn, lora_id, body.trigger_words, body.memo, scanner.utc_now())
+            ok = repository.update_lora_notes(conn, lora_id, body.trigger_words, body.memo, now)
+            if ok and body.trigger_words is not None:
+                # FR-49: trigger words become dictionary entries the moment they are saved.
+                tag_importer.register_trigger_words(conn, lora_id, body.trigger_words, now)
             conn.commit()
             lora = repository.get_lora(conn, lora_id) if ok else None
         if lora is None:
@@ -340,6 +437,8 @@ def _register_routes(app: FastAPI) -> None:
         dir: str | None = None,
         recursive: bool = True,
         lora: int | None = None,
+        tag: list[int] | None = Query(None),
+        tag_match: str = Query("and", pattern="^(and|or)$"),
     ):
         # 確認事項 #10(a): missing_only is an addition for the "見つからない" pane.
         # 確認事項 #8: dir omitted -> no folder filter; dir="" -> root (see repository).
@@ -350,6 +449,8 @@ def _register_routes(app: FastAPI) -> None:
             "dir": dir.strip("/") if dir is not None else None,
             "recursive": recursive,
             "lora": lora,
+            "tags": tag,
+            "tag_match": tag_match,
         }
         decoded = decode_cursor(cursor) if cursor is not None else None
         with with_db(request) as conn:
@@ -367,9 +468,13 @@ def _register_routes(app: FastAPI) -> None:
         with with_db(request) as conn:
             img = repository.get_image(conn, image_id)
             loras = repository.get_image_loras(conn, image_id) if img else []
+            resolved = repository.resolve_prompt_tokens(conn, image_id) if img else []
         if img is None:
             raise not_found()
-        return image_to_json(img, [image_lora_to_json(r) for r in loras])
+        prompt_tokens_json = [
+            {"token": token, "tag": tag_to_json(tag) if tag else None} for token, tag in resolved
+        ]
+        return image_to_json(img, [image_lora_to_json(r) for r in loras], prompt_tokens_json)
 
     @app.get("/images/{image_id}/thumbnail")
     def get_thumbnail(request: Request, image_id: int):

@@ -79,6 +79,24 @@
   pre.prompt.empty { color: var(--muted); font-style: italic; }
   .copied { color: #7fd48a; font-size: 11px; margin-left: 6px; }
   a { color: var(--accent); }
+  /* tags */
+  #tag-import-btn { width: 100%; margin-bottom: 4px; }
+  #tag-import-result { font-size: 12px; white-space: pre-line; margin-bottom: 4px; }
+  #tag-search { width: 100%; box-sizing: border-box; background: #141517; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px 6px; margin: 4px 0; font: inherit; }
+  #tag-used-head { margin-top: 6px; font-size: 11px; }
+  .tag-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; flex: none; background: var(--tagc, #888); }
+  .item .post { color: var(--muted); font-size: 10px; margin-left: 4px; flex: none; }
+  #tag-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  #tag-bar select { background: #33353b; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px; font: inherit; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; border: 1px solid var(--tagc, var(--border)); background: color-mix(in srgb, var(--tagc, #888) 18%, transparent); font-size: 12px; cursor: default; }
+  .chip .x { cursor: pointer; color: var(--muted); }
+  .chip .x:hover { color: var(--text); }
+  .chip.unknown { border-style: dashed; color: var(--muted); }
+  .chip.clickable { cursor: pointer; }
+  .chip.on { outline: 2px solid var(--accent); }
+  .tokens { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .chip .sub { color: var(--muted); font-size: 10px; }
+  .chip a { color: inherit; font-size: 10px; }
   /* LoRA */
   #lora-scan-btn { width: 100%; margin-bottom: 4px; }
   #lora-scan-result { font-size: 12px; white-space: pre-line; margin-bottom: 4px; }
@@ -117,6 +135,15 @@
     <button id="lora-scan-btn" type="button">LoRA スキャン</button>
     <div id="lora-scan-result" class="muted"></div>
     <ul id="lora-list" class="tree"></ul>
+
+    <h2>タグ</h2>
+    <input type="file" id="tag-csv" accept=".csv,text/csv" hidden>
+    <button id="tag-import-btn" type="button">タグ CSV を取り込む</button>
+    <div id="tag-import-result" class="muted"></div>
+    <input id="tag-search" type="search" placeholder="辞書を検索（全列）" autocomplete="off">
+    <ul id="tag-search-results" class="tree"></ul>
+    <div id="tag-used-head" class="muted">使用中のタグ</div>
+    <ul id="tag-used" class="tree"></ul>
   </aside>
 
   <main id="center" class="pane">
@@ -128,6 +155,17 @@
         <input id="cell-slider" type="range" min="96" max="320" step="8" value="160">
         <span id="cell-value" class="muted">160px</span>
       </label>
+    </div>
+    <div id="tag-bar" hidden>
+      <span class="muted">タグ:</span>
+      <span id="tag-chips"></span>
+      <label class="muted" title="複数タグの扱い">
+        <select id="tag-match">
+          <option value="and">すべて含む</option>
+          <option value="or">いずれかを含む</option>
+        </select>
+      </label>
+      <button id="tag-clear" type="button">解除</button>
     </div>
     <div id="grid-wrap">
       <div id="grid"></div>

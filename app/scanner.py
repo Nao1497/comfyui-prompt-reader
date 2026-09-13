@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PIL import Image as PILImage
 
-from app import comfy_metadata, repository, thumbnailer
+from app import comfy_metadata, prompt_tokens, repository, thumbnailer
 from app.config import AppConfig
 from app.models import Image, ScanRun
 
@@ -278,6 +278,7 @@ def _register_new(
         repository.insert_raw_metadata(conn, image_id, info.prompt_text, info.workflow_text)
     if prompt is not None:
         record_lora_usage(conn, image_id, prompt, now)
+    store_prompt_tokens(conn, image_id, columns.get("positive_prompt"), columns.get("negative_prompt"))
     if extraction_status == "partial":
         # 確認事項 #3: extract_failed_count = newly registered images left partial.
         run.extract_failed_count += 1
@@ -286,6 +287,17 @@ def _register_new(
     else:
         _make_thumbnail(conn, config, path, image_id, run)
     return image_id
+
+
+def store_prompt_tokens(
+    conn: sqlite3.Connection, image_id: int, positive: str | None, negative: str | None
+) -> None:
+    """FR-48: keep the normalised words of both prompts so the dictionary can be joined later."""
+    pos = prompt_tokens.tokenize(positive)
+    neg = prompt_tokens.tokenize(negative)
+    if pos or neg:
+        repository.replace_prompt_tokens(conn, image_id, pos, neg)
+        repository.link_image_tags(conn, image_id)
 
 
 def record_lora_usage(conn: sqlite3.Connection, image_id: int, prompt: dict, now: str) -> int:

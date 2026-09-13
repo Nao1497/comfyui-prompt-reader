@@ -5,7 +5,9 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from app.models import Image, Lora, LoraUsage, RawMetadata, ScanRun
+from app import db
+
+from app.models import Image, Lora, LoraUsage, RawMetadata, ScanRun, Tag, TagImport
 
 IMAGE_COLUMNS = [
     "id", "content_hash", "file_path", "dir_path", "file_name", "file_size",
@@ -113,6 +115,21 @@ def _list_where(filters: dict[str, Any]) -> tuple[str, list[Any]]:
     if lora_id is not None:
         clauses.append("id IN (SELECT image_id FROM image_loras WHERE lora_id = ?)")
         params.append(lora_id)
+    tag_ids = list(dict.fromkeys(filters.get("tags") or []))
+    if tag_ids:
+        ph = ", ".join("?" * len(tag_ids))
+        if filters.get("tag_match", "and") == "or":
+            clauses.append(f"id IN (SELECT image_id FROM image_tags WHERE tag_id IN ({ph}))")
+            params.extend(tag_ids)
+        else:
+            # FR-50 "すべて含む": start from the tag index and keep images hit by every tag
+            # (design §9: GROUP BY/HAVING beats a chain of EXISTS by an order of magnitude).
+            clauses.append(
+                f"id IN (SELECT image_id FROM image_tags WHERE tag_id IN ({ph})"
+                f" GROUP BY image_id HAVING COUNT(DISTINCT tag_id) = ?)"
+            )
+            params.extend(tag_ids)
+            params.append(len(tag_ids))
     dir_path = filters.get("dir")
     recursive = filters.get("recursive", True)
     if dir_path is not None:
@@ -373,3 +390,242 @@ def iter_raw_prompts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT image_id, prompt_json FROM image_raw_metadata WHERE prompt_json IS NOT NULL"
     ).fetchall()
+
+
+# --- prompt tokens (FR-48) ----------------------------------------------------
+
+def replace_prompt_tokens(
+    conn: sqlite3.Connection, image_id: int, positive: list[str], negative: list[str]
+) -> None:
+    """Store the normalised words of both prompts, in order. Unknown words are kept too."""
+    conn.execute("DELETE FROM image_prompt_tokens WHERE image_id = ?", (image_id,))
+    rows = [(image_id, "positive", i, t) for i, t in enumerate(positive)]
+    rows += [(image_id, "negative", i, t) for i, t in enumerate(negative)]
+    conn.executemany(
+        "INSERT INTO image_prompt_tokens (image_id, side, position, token) VALUES (?, ?, ?, ?)", rows
+    )
+
+
+def get_prompt_tokens(conn: sqlite3.Connection, image_id: int, side: str = "positive") -> list[str]:
+    rows = conn.execute(
+        "SELECT token FROM image_prompt_tokens WHERE image_id = ? AND side = ? ORDER BY position",
+        (image_id, side),
+    ).fetchall()
+    return [r["token"] for r in rows]
+
+
+def image_ids_without_tokens(conn: sqlite3.Connection) -> list[tuple[int, str | None, str | None]]:
+    """Images that have a prompt but no stored tokens (registered before FR-48)."""
+    rows = conn.execute(
+        """
+        SELECT id, positive_prompt, negative_prompt FROM images
+         WHERE (positive_prompt IS NOT NULL OR negative_prompt IS NOT NULL)
+           AND NOT EXISTS (SELECT 1 FROM image_prompt_tokens t WHERE t.image_id = images.id)
+        """
+    ).fetchall()
+    return [(int(r["id"]), r["positive_prompt"], r["negative_prompt"]) for r in rows]
+
+
+# --- tag linking (FR-47 / FR-48) ---------------------------------------------
+
+_LINK_BY_NAME = """
+    INSERT OR IGNORE INTO image_tags (image_id, tag_id)
+    SELECT DISTINCT t.image_id, g.id
+      FROM image_prompt_tokens t JOIN tags g ON g.name_normalized = t.token
+     WHERE t.side = 'positive'{extra}
+"""
+_LINK_BY_ALIAS = """
+    INSERT OR IGNORE INTO image_tags (image_id, tag_id)
+    SELECT DISTINCT t.image_id, a.tag_id
+      FROM image_prompt_tokens t JOIN tag_aliases a ON a.alias_normalized = t.token
+     WHERE t.side = 'positive'
+       AND NOT EXISTS (SELECT 1 FROM tags g WHERE g.name_normalized = t.token){extra}
+"""
+
+
+def rebuild_image_tags(conn: sqlite3.Connection) -> int:
+    """Recreate image_tags from stored tokens; return the number of linked images."""
+    conn.execute("DELETE FROM image_tags")
+    conn.execute(_LINK_BY_NAME.format(extra=""))
+    conn.execute(_LINK_BY_ALIAS.format(extra=""))
+    return int(conn.execute("SELECT COUNT(DISTINCT image_id) FROM image_tags").fetchone()[0])
+
+
+def link_image_tags(conn: sqlite3.Connection, image_id: int) -> None:
+    """Link one image (used right after registration)."""
+    conn.execute("DELETE FROM image_tags WHERE image_id = ?", (image_id,))
+    conn.execute(_LINK_BY_NAME.format(extra=" AND t.image_id = ?"), (image_id,))
+    conn.execute(_LINK_BY_ALIAS.format(extra=" AND t.image_id = ?"), (image_id,))
+
+
+def link_token_to_tag(conn: sqlite3.Connection, token: str, tag_id: int) -> int:
+    """Link every image whose positive prompt has ``token`` to ``tag_id`` (new dictionary word)."""
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO image_tags (image_id, tag_id)
+        SELECT DISTINCT image_id, ? FROM image_prompt_tokens WHERE token = ? AND side = 'positive'
+        """,
+        (tag_id, token),
+    )
+    return int(cur.rowcount)
+
+
+def get_image_tag_ids(conn: sqlite3.Connection, image_id: int) -> list[int]:
+    rows = conn.execute("SELECT tag_id FROM image_tags WHERE image_id = ? ORDER BY tag_id", (image_id,)).fetchall()
+    return [int(r["tag_id"]) for r in rows]
+
+
+def rebuild_fts(conn: sqlite3.Connection) -> None:
+    if db.fts_available(conn):
+        conn.execute("INSERT INTO tags_fts(tags_fts) VALUES ('rebuild')")
+
+
+def insert_tag_import(conn: sqlite3.Connection, run: TagImport) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO tag_imports (started_at, finished_at, file_name, read_count, imported_count,
+                                 skipped_count, alias_count, linked_image_count, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run.started_at, run.finished_at, run.file_name, run.read_count, run.imported_count,
+         run.skipped_count, run.alias_count, run.linked_image_count, run.error),
+    )
+    return int(cur.lastrowid)
+
+
+def count_tags(conn: sqlite3.Connection, source: str | None = None) -> int:
+    if source is None:
+        return int(conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0])
+    return int(conn.execute("SELECT COUNT(*) FROM tags WHERE source = ?", (source,)).fetchone()[0])
+
+
+# --- tag lookup / search (FR-51 / FR-52) -------------------------------------
+
+TAG_COLUMNS = [
+    "id", "name", "name_normalized", "category", "category_name", "post_count", "tag_created_at",
+    "aliases", "other_names", "posts_url", "wiki_url", "has_wiki", "source", "lora_id",
+    "created_at", "updated_at",
+]
+_TAG_SELECT = (
+    "SELECT " + ", ".join("t." + c for c in TAG_COLUMNS)
+    + ", (SELECT COUNT(*) FROM image_tags it JOIN images i ON i.id = it.image_id"
+    + "    WHERE it.tag_id = t.id AND i.presence = 'active') AS image_count"
+    + " FROM tags t"
+)
+
+
+def _row_to_tag(row: sqlite3.Row) -> Tag:
+    return Tag(**{c: row[c] for c in TAG_COLUMNS}, image_count=int(row["image_count"]))
+
+
+def get_tag(conn: sqlite3.Connection, tag_id: int) -> Tag | None:
+    row = conn.execute(_TAG_SELECT + " WHERE t.id = ?", (tag_id,)).fetchone()
+    return _row_to_tag(row) if row else None
+
+
+def find_tag_by_normalized(conn: sqlite3.Connection, name_normalized: str) -> Tag | None:
+    row = conn.execute(_TAG_SELECT + " WHERE t.name_normalized = ?", (name_normalized,)).fetchone()
+    return _row_to_tag(row) if row else None
+
+
+def _tag_filters(category: int | None, source: str | None) -> tuple[str, list[Any]]:
+    clauses, params = [], []
+    if category is not None:
+        clauses.append("t.category = ?")
+        params.append(category)
+    if source is not None:
+        clauses.append("t.source = ?")
+        params.append(source)
+    return (" AND " + " AND ".join(clauses)) if clauses else "", params
+
+
+def search_tags(
+    conn: sqlite3.Connection, query: str, limit: int,
+    category: int | None = None, source: str | None = None,
+) -> list[Tag]:
+    """Search every imported column; ``query`` must already be normalised (design §7).
+
+    Uses the FTS5 trigram index when present and the query has at least three
+    characters (the trigram minimum); otherwise falls back to LIKE.
+    """
+    extra, params = _tag_filters(category, source)
+    if not query:
+        rows = conn.execute(
+            _TAG_SELECT + " WHERE 1 = 1" + extra + " ORDER BY t.post_count DESC, t.id LIMIT ?",
+            params + [limit],
+        ).fetchall()
+    elif len(query) >= 3 and db.fts_available(conn):
+        phrase = '"' + query.replace('"', '""') + '"'
+        rows = conn.execute(
+            _TAG_SELECT.replace(" FROM tags t", " FROM tags_fts f JOIN tags t ON t.id = f.rowid")
+            + " WHERE tags_fts MATCH ?" + extra + " ORDER BY t.post_count DESC, t.id LIMIT ?",
+            [phrase] + params + [limit],
+        ).fetchall()
+    else:
+        like = "%" + _like_prefix(query) + "%"
+        rows = conn.execute(
+            _TAG_SELECT
+            + " WHERE (t.name_normalized LIKE ? ESCAPE '\\' OR t.aliases LIKE ? ESCAPE '\\'"
+            + " OR t.other_names LIKE ? ESCAPE '\\' OR t.category_name LIKE ? ESCAPE '\\')"
+            + extra + " ORDER BY t.post_count DESC, t.id LIMIT ?",
+            [like, like, like, like] + params + [limit],
+        ).fetchall()
+    return [_row_to_tag(r) for r in rows]
+
+
+def list_used_tags(conn: sqlite3.Connection, limit: int) -> list[Tag]:
+    """Tags linked to at least one active image, most used first (left pane)."""
+    rows = conn.execute(
+        "SELECT " + ", ".join("t." + c for c in TAG_COLUMNS) + ", COUNT(*) AS image_count"
+        + "  FROM image_tags it JOIN images i ON i.id = it.image_id JOIN tags t ON t.id = it.tag_id"
+        + " WHERE i.presence = 'active'"
+        + " GROUP BY t.id ORDER BY image_count DESC, t.post_count DESC, t.name LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [_row_to_tag(r) for r in rows]
+
+
+def resolve_prompt_tokens(conn: sqlite3.Connection, image_id: int) -> list[tuple[str, Tag | None]]:
+    """Positive prompt words in order, each with its dictionary tag (name first, then alias)."""
+    tokens = get_prompt_tokens(conn, image_id, "positive")
+    if not tokens:
+        return []
+    distinct = list(dict.fromkeys(tokens))
+    found: dict[str, Tag] = {}
+    for chunk in range(0, len(distinct), 500):
+        part = distinct[chunk:chunk + 500]
+        ph = ", ".join("?" * len(part))
+        for row in conn.execute(_TAG_SELECT + f" WHERE t.name_normalized IN ({ph})", part):
+            found[row["name_normalized"]] = _row_to_tag(row)
+        rest = [t for t in part if t not in found]
+        if rest:
+            ph = ", ".join("?" * len(rest))
+            for row in conn.execute(
+                "SELECT a.alias_normalized AS alias, " + ", ".join("t." + c for c in TAG_COLUMNS)
+                + ", (SELECT COUNT(*) FROM image_tags it JOIN images i ON i.id = it.image_id"
+                + "    WHERE it.tag_id = t.id AND i.presence = 'active') AS image_count"
+                + f" FROM tag_aliases a JOIN tags t ON t.id = a.tag_id WHERE a.alias_normalized IN ({ph})"
+                + " ORDER BY t.post_count DESC",
+                rest,
+            ):
+                found.setdefault(row["alias"], _row_to_tag(row))
+    return [(t, found.get(t)) for t in tokens]
+
+
+def insert_lora_tag(conn: sqlite3.Connection, name: str, name_normalized: str, lora_id: int, now: str) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO tags (name, name_normalized, category, category_name, post_count, source, lora_id,
+                          created_at, updated_at)
+        VALUES (?, ?, NULL, 'lora', 0, 'lora', ?, ?, ?)
+        """,
+        (name, name_normalized, lora_id, now, now),
+    )
+    tag_id = int(cur.lastrowid)
+    if db.fts_available(conn):
+        conn.execute(
+            "INSERT INTO tags_fts (rowid, name_normalized, aliases, other_names, category_name)"
+            " VALUES (?, ?, '', '', 'lora')",
+            (tag_id, name_normalized),
+        )
+    return tag_id

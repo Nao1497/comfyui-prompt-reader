@@ -546,6 +546,123 @@
 - 完了条件（Playwright で確認済み）: LoRA 選択で一覧が絞り込まれエディタが開く。保存が API に反映され Trigger Words のコピーが一致する。画像詳細に使用 LoRA と Trigger Words が出て、名前からエディタへ戻れる。固定項目やフォルダの選択で LoRA 絞り込みが解除される
 - 関連: FR-43, FR-44 / AC-30（UI 側確認）
 
+### TASK-27
+
+- ID: TASK-27
+- 目的: プロンプト文字列から正規化済みの語を切り出す純粋関数（FR-46）
+- 対象ファイル:
+  - 新規: `app/prompt_tokens.py`（`normalize(text) -> str`, `normalize_name(name) -> str`, `tokenize(prompt) -> list[str]`）
+  - 新規: `tests/test_prompt_tokens.py`
+- 完了条件:
+  - design.md §6「正規化」の 6 手順を実装する。カンマ分割、重み指定と強調括弧の除去、括弧エスケープの復元、アンダースコアから半角空白への置換、小文字化、前後空白の除去
+  - `<lora:...>`、`BREAK`、埋め込み名を語として返さない。空文字列を返さない
+  - 辞書側の名前には `normalize_name`（手順 4 〜 6 のみ。括弧は残す）を当てて `name_normalized` を作る
+  - 検証: `pytest tests/test_prompt_tokens.py`
+    - `masterpiece, (long hair:1.2), [detailed], \(cosplay\)` から `["masterpiece", "long hair", "detailed", "(cosplay)"]` が得られる
+    - 入れ子の括弧、全角文字、連続カンマ、空要素、前後空白
+    - `hatsune_miku_(cosplay)` を正規化すると `hatsune miku (cosplay)` になり、プロンプト側の `hatsune miku \(cosplay\)` と一致する
+- 関連: FR-46 / AC-32
+
+### TASK-28
+
+- ID: TASK-28
+- 目的: 辞書とタグ関連のスキーマを追加し、画像スキャン時にプロンプトの語を保存する（FR-48 の保存部分）
+- 対象ファイル:
+  - 変更: `app/db.py`（`tags` / `tag_aliases` / `tags_fts` / `image_prompt_tokens` / `image_tags` / `tag_imports`）, `app/models.py`, `app/repository.py`
+  - 変更: `app/scanner.py`（登録時に語を保存）
+  - 新規: `tests/test_scan_prompt_tokens.py`
+- 完了条件:
+  - design.md §2 の各表と索引を作成する。既存 DB へも起動時に追加される
+  - 画像の登録時に positive と negative の語を出現順で保存する。辞書に無い語も保存する
+  - 画像を削除すると語と関連が消える
+  - 検証: `pytest tests/test_scan_prompt_tokens.py`
+- 関連: FR-48
+
+### TASK-29
+
+- ID: TASK-29
+- 目的: タグ CSV の取り込みと、画像との関連付けの再構築（FR-45 / FR-47 / FR-48）
+- 対象ファイル:
+  - 新規: `app/tag_importer.py`
+  - 変更: `app/api.py`（`POST /tags/import`）, `pyproject.toml`（`python-multipart`）
+  - 新規: `tests/test_tag_import.py`
+- 完了条件:
+  - ヘッダ行付き CSV の全列を保持して取り込む。列が足りなければ `400 INVALID_TAG_CSV` を返し辞書を変更しない
+  - `source = 'csv'` の行のみ全件置き換える。解釈できない行は飛ばして件数に数える
+  - `aliases` を分割して別名表を作る。正式名として存在する別名は入れない
+  - 取り込み後に `image_prompt_tokens` との結合で `image_tags` を作り直す。positive の語のみ対象とする
+  - 別名でのみ一致する語が正式タグに紐づく。正式名と別名が競合する語は正式名を採る
+  - 画像スキャンとロックを共有し、実行中は `409 SCAN_IN_PROGRESS`
+  - 検証: `pytest tests/test_tag_import.py`
+    - 同じ CSV を 2 回取り込んでも辞書の件数が増えない（AC-31）
+    - 重み指定とエスケープを含むプロンプトの画像がタグに紐づく（AC-32 の照合部分）
+    - 別名一致、正式名優先、和名では紐づかない（AC-33）
+    - negative にしか無い語では紐づかない（AC-34）
+- 関連: FR-45, FR-47, FR-48 / AC-31, AC-32, AC-33, AC-34
+
+### TASK-30
+
+- ID: TASK-30
+- 目的: 辞書の全列検索と参照の API（FR-51）
+- 対象ファイル:
+  - 変更: `app/tag_importer.py`（FTS5 索引の作成）, `app/repository.py`, `app/api.py`（`GET /tags/search`, `GET /tags/used`, `GET /tags/{id}`）
+  - 新規: `tests/test_api_tags.py`
+- 完了条件:
+  - `tags_fts` を trigram トークナイザで作り、取り込みのたびに作り直す
+  - 検索語に FR-46 の正規化を当ててから引く。空白区切りの入力でアンダースコア区切りの名前に当たる
+  - 英語と日本語の部分一致で引け、投稿数の降順で返る。区分と出所で絞れる
+  - `GET /tags/used` は active な画像での使用件数が多い順に返す
+  - `GET /tags/{id}` は全項目と使用件数を返し、LoRA 由来なら登録元を含める。未存在は `404 NOT_FOUND`
+  - 検証: `pytest tests/test_api_tags.py`（AC-37）
+- 関連: FR-51 / AC-37
+
+### TASK-31
+
+- ID: TASK-31
+- 目的: タグによる一覧の絞り込みと、画像詳細での辞書表示（FR-50 / FR-52）
+- 対象ファイル:
+  - 変更: `app/repository.py`, `app/api.py`
+  - 変更: `tests/test_api_images.py`
+- 完了条件:
+  - `GET /images` に `tag` の繰り返し指定と `tag_match` を追加する。`and` は `GROUP BY` と `HAVING` で組み立てる
+  - フォルダ、お気に入り、見つからない、LoRA との併用がすべて AND になる。カーソル方式と総件数も従来どおり動く
+  - `GET /images/{id}` が `promptTokens` を出現順で返す。各語に区分・投稿数・和名を含め、辞書に無い語は `tag` を `null` とする
+  - 検証: `pytest tests/test_api_images.py`（AC-35、および AC-32 の詳細表示部分）
+- 関連: FR-50, FR-52 / AC-35
+
+### TASK-32
+
+- ID: TASK-32
+- 目的: LoRA の Trigger Words を辞書へ自動登録する（FR-49）
+- 対象ファイル:
+  - 変更: `app/api.py`（`PUT /loras/{id}`）, `app/tag_importer.py`, `app/repository.py`
+  - 新規: `tests/test_lora_trigger_tags.py`
+- 完了条件:
+  - 保存時にカンマで分割し、正規化して `source = 'lora'` で登録する。登録元の LoRA をたどれる
+  - 既存の語とは重複させない。CSV 由来と重なる場合は CSV 側を使う
+  - 新規に登録した語については、その語を持つ画像だけを引いて関連付けを追加する。辞書全体との結合は行わない
+  - CSV を取り込み直しても登録が残る
+  - LoRA から語を外しても辞書からは消えない
+  - 検証: `pytest tests/test_lora_trigger_tags.py`
+    - 保存した語で画像が絞り込める（AC-36）
+    - CSV 再取り込み後も残る（AC-36）
+    - 辞書に無かった語を後から登録すると、再スキャンなしで絞り込みに現れる（AC-38）
+- 関連: FR-49 / AC-36, AC-38
+
+### TASK-33
+
+- ID: TASK-33
+- 目的: タグの UI（左ペインの区画、取り込み、詳細ペインの語一覧）
+- 対象ファイル: `app/static/index.html`, `app/static/app.js`
+- 完了条件:
+  - 左ペインにタグ区画を置く。CSV 取り込みボタン、使用中タグの一覧、辞書の検索欄
+  - タグを複数選択でき、選択中を上部に並べ、すべて含むといずれかを含むを切り替えられる。件数を随時表示する
+  - 区分ごとに色を変える。LoRA 由来の語は独自の区分とし、登録元へ移動できる
+  - 詳細ペインで positive プロンプトを語ごとに表示し、区分・投稿数・和名を添える。選ぶとその語で絞り込む。辞書に無い語はその旨を示す
+  - 取り込み中は処理中の状態を出す
+  - 検証（手動）: 取り込み、検索、複数タグの AND と OR、フォルダとの併用、語からの絞り込み、LoRA への移動
+- 関連: FR-50, FR-51, FR-52
+
 ---
 
 ## AC 対応表
@@ -582,6 +699,38 @@
 | AC-28 | スキャン時の自動リネーム | TASK-23 |
 | AC-29 | LoRA ファイルと workflow 由来 LoRA の統合・使用件数・missing | TASK-24, TASK-25 |
 | AC-30 | Trigger Words / メモの保存と LoRA 絞り込み | TASK-25, TASK-26 |
+| AC-31 | タグ CSV の取り込みと二重登録の防止 | TASK-29 |
+| AC-32 | 重み指定とエスケープを含む語の完全一致と詳細表示 | TASK-27, TASK-29, TASK-31 |
+| AC-33 | 別名一致と正式名優先、和名は対象外 | TASK-29 |
+| AC-34 | negative の語では絞り込まれない | TASK-29 |
+| AC-35 | 複数タグの AND と OR、他条件との併用 | TASK-31 |
+| AC-36 | LoRA トリガーワードの登録と CSV 再取り込み後の保持 | TASK-32 |
+| AC-37 | 辞書の全列検索と並び順 | TASK-30 |
+| AC-38 | 辞書追加後の遡及的な関連付け | TASK-32 |
+
+---
+
+## タグ辞書の決定事項
+
+利用者との確認で確定した内容。requirements.md と design.md に反映済み。実装時に迷ったらこの表ではなく両ファイルを参照する。
+
+| 論点 | 決定 |
+|---|---|
+| 用途 | タグによる絞り込みと、プロンプト中の語の辞書表示の両方 |
+| 入力方法 | CSV のアップロード |
+| 保存範囲 | CSV の全列を保持する |
+| 照合 | 正規化したうえでの完全一致のみ。表記ゆれの吸収は行わない |
+| 正規化 | カンマ分割、重み指定と強調括弧の除去、括弧エスケープの復元、アンダースコアから半角空白、小文字化、前後空白の除去 |
+| 別名 | `aliases` の完全一致も採る。正式名を優先する。`other_names` は対象外 |
+| negative | 語は保存するが関連付けと絞り込みの対象にしない |
+| 複数タグ | すべて含むといずれかを含むを切り替えられる |
+| 辞書検索 | 全列を対象とした部分一致。FTS5 の trigram 索引を使う |
+| 手動登録 | LoRA の Trigger Words をカンマで分割し、保存時に自動登録する |
+| 登録分の保護 | CSV の取り込みで削除しない |
+| LoRA 絞り込みとの関係 | 両方を残し、相互に移動できるようにする |
+| 画像側の持ち方 | 正規化済みの語を保存し、辞書との結合で関連付けを作る |
+
+実装中に決めれば足りるものとして、タグが付かなかった画像の絞り込み、詳細画面での語の並び順、手動登録分の書き出し、アップロードの上限、辞書を空にする操作、辞書が未取り込みのときの画面を残している。
 
 ---
 
@@ -638,6 +787,10 @@
 ---
 
 ## 実装状況
+
+TASK-1 〜 TASK-33 を実装済み。
+
+TASK-27 〜 TASK-33（タグ辞書）は `python -m pytest`（167 件）で完了条件を検証し、UI は Playwright で CSV 取り込み、日本語検索、タグ選択と AND / OR 切替、フォルダとの併用、詳細の語チップからの絞り込み、LoRA トリガーワードの登録と絞り込みを確認した。design.md §6 の「規模」に実装後の実測値を記録している。
 
 TASK-1 〜 TASK-22 をすべて実装済み（各タスク 1 コミット、コミット件名に `TASK-n:` を付与）。
 自動テストは `python -m pytest`（111 件）で完了条件を検証している。フロントエンドの手動確認項目（TASK-19〜22）は Playwright + Chromium で以下を確認した。
