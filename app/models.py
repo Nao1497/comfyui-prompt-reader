@@ -79,3 +79,38 @@ class LoraUsage:
     name: str
     strength_model: float | None = None
     strength_clip: float | None = None
+
+
+@dataclass
+class Tag:
+    id: int
+    name: str
+    name_normalized: str
+    category: int | None
+    category_name: str
+    post_count: int
+    tag_created_at: str | None
+    aliases: str
+    other_names: str
+    posts_url: str | None
+    wiki_url: str | None
+    has_wiki: str | None
+    source: str
+    lora_id: int | None
+    created_at: str
+    updated_at: str
+    image_count: int = 0
+
+
+@dataclass
+class TagImport:
+    id: int
+    started_at: str
+    finished_at: str | None
+    file_name: str | None
+    read_count: int = 0
+    imported_count: int = 0
+    skipped_count: int = 0
+    alias_count: int = 0
+    linked_image_count: int = 0
+    error: str | None = None
