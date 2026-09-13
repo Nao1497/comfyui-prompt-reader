@@ -11,8 +11,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import db
+from app import db, scanner
 from app.config import AppConfig
+from app.models import ScanRun
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +84,43 @@ def _format_validation(exc: RequestValidationError) -> str:
     return "; ".join(parts) or "validation error"
 
 
+def scan_run_to_json(run: ScanRun) -> dict:
+    return {
+        "scanRunId": run.id,
+        "startedAt": run.started_at,
+        "finishedAt": run.finished_at,
+        "scannedCount": run.scanned_count,
+        "createdCount": run.created_count,
+        "updatedCount": run.updated_count,
+        "missingCount": run.missing_count,
+        "extractFailedCount": run.extract_failed_count,
+        "thumbnailGeneratedCount": run.thumbnail_generated_count,
+        "thumbnailFailedCount": run.thumbnail_failed_count,
+    }
+
+
 def _register_routes(app: FastAPI) -> None:
     @app.get("/health")
     def health():
         return {"status": "ok"}
+
+    @app.post("/scan")
+    def post_scan(request: Request):
+        """Run a scan synchronously (sync endpoint -> threadpool, so other requests still serve)."""
+        config: AppConfig = request.app.state.config
+        scan_lock: threading.Lock = request.app.state.scan_lock
+        if not scan_lock.acquire(blocking=False):
+            raise ApiError(409, "SCAN_IN_PROGRESS", "a scan is already running")
+        try:
+            if not config.scan_root.is_dir():
+                raise ApiError(400, "INVALID_SCAN_ROOT", "scan root does not exist")
+            # The scan uses its own connection so reads on app.state.conn are not
+            # blocked for the duration of the scan (WAL allows concurrent readers).
+            conn = db.connect(config.db_path)
+            try:
+                run = scanner.run_scan(config, conn)
+            finally:
+                conn.close()
+            return scan_run_to_json(run)
+        finally:
+            scan_lock.release()
