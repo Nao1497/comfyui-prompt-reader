@@ -1,0 +1,57 @@
+"""Dataclasses mirroring the SQLite tables (design.md §2)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Image:
+    id: int
+    content_hash: str
+    file_path: str
+    dir_path: str
+    file_name: str
+    file_size: int
+    image_width: int | None
+    image_height: int | None
+    file_mtime: str
+    presence: str
+    is_favorite: bool
+    thumbnail_name: str | None
+    thumbnail_status: str
+    extraction_status: str
+    positive_prompt: str | None
+    negative_prompt: str | None
+    model_name: str | None
+    seed: int | None
+    steps: int | None
+    cfg: float | None
+    sampler_name: str | None
+    scheduler: str | None
+    gen_width: int | None
+    gen_height: int | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class RawMetadata:
+    image_id: int
+    prompt_json: str | None
+    workflow_json: str | None
+
+
+@dataclass
+class ScanRun:
+    id: int
+    started_at: str
+    finished_at: str | None
+    scanned_count: int = 0
+    created_count: int = 0
+    updated_count: int = 0
+    missing_count: int = 0
+    extract_failed_count: int = 0
+    thumbnail_generated_count: int = 0
+    thumbnail_failed_count: int = 0
+    error: str | None = None
