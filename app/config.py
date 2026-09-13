@@ -22,6 +22,8 @@ class AppConfig:
     db_path: Path = Path("./data/images.db")
     host: str = "127.0.0.1"
     port: int = 8000
+    rename_on_scan: bool = True  # FR-40: rename originals to YYYYMMDDTHHMMSS_<uuid8>.png
+    lora_root: Path | None = None  # FR-41: folder holding LoRA files (optional)
 
     @property
     def thumbnail_dir(self) -> Path:
@@ -37,6 +39,7 @@ _DEFAULTS = {
     "db_path": "./data/images.db",
     "host": "127.0.0.1",
     "port": 8000,
+    "rename_on_scan": True,
 }
 
 
@@ -75,4 +78,6 @@ def load_config(path: str | Path) -> AppConfig:
         db_path=db_path,
         host=str(values["host"]),
         port=int(values["port"]),
+        rename_on_scan=bool(values["rename_on_scan"]),
+        lora_root=Path(values["lora_root"]) if values.get("lora_root") else None,
     )

@@ -54,4 +54,28 @@ class ScanRun:
     extract_failed_count: int = 0
     thumbnail_generated_count: int = 0
     thumbnail_failed_count: int = 0
+    renamed_count: int = 0
     error: str | None = None
+
+
+@dataclass
+class Lora:
+    id: int
+    name: str
+    file_name: str
+    file_size: int | None
+    file_mtime: str | None
+    presence: str
+    trigger_words: str
+    memo: str
+    created_at: str
+    updated_at: str
+    image_count: int = 0
+
+
+@dataclass
+class LoraUsage:
+    """One LoRA referenced by an image's workflow."""
+    name: str
+    strength_model: float | None = None
+    strength_clip: float | None = None

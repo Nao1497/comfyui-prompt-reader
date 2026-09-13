@@ -43,3 +43,22 @@ def without(graph: dict[str, Any], *node_ids: str) -> dict[str, Any]:
     for nid in node_ids:
         g.pop(nid, None)
     return g
+
+
+def with_loras(graph: dict[str, Any], *loras: tuple[str, float, float]) -> dict[str, Any]:
+    """Chain LoraLoader nodes between the checkpoint and the sampler."""
+    g = copy.deepcopy(graph)
+    prev_model = ["4", 0]
+    prev_clip = ["4", 1]
+    for i, (name, sm, sc) in enumerate(loras):
+        nid = str(100 + i)
+        g[nid] = {
+            "class_type": "LoraLoader",
+            "inputs": {"lora_name": name, "strength_model": sm, "strength_clip": sc, "model": prev_model, "clip": prev_clip},
+        }
+        prev_model = [nid, 0]
+        prev_clip = [nid, 1]
+    g["3"]["inputs"]["model"] = prev_model
+    g["6"]["inputs"]["clip"] = prev_clip
+    g["7"]["inputs"]["clip"] = prev_clip
+    return g

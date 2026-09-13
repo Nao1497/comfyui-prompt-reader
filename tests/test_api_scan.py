@@ -8,7 +8,7 @@ from tests.conftest import make_png
 SCAN_KEYS = {
     "scanRunId", "startedAt", "finishedAt", "scannedCount", "createdCount",
     "updatedCount", "missingCount", "extractFailedCount",
-    "thumbnailGeneratedCount", "thumbnailFailedCount",
+    "thumbnailGeneratedCount", "thumbnailFailedCount", "renamedCount",
 }
 
 
@@ -37,7 +37,7 @@ def test_invalid_scan_root_returns_400_and_changes_nothing(tmp_path, scan_root, 
     with TestClient(create_app(config)) as c:
         assert c.post("/scan").status_code == 200
 
-    bad = AppConfig(scan_root=tmp_path / "does-not-exist", db_path=config.db_path)
+    bad = AppConfig(scan_root=tmp_path / "does-not-exist", db_path=config.db_path, rename_on_scan=False)
     with TestClient(create_app(bad)) as c:
         resp = c.post("/scan")
 

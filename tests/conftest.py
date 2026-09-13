@@ -72,7 +72,9 @@ def scan_root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def config(tmp_path: Path, scan_root: Path) -> AppConfig:
-    return AppConfig(scan_root=scan_root, db_path=tmp_path / "data" / "images.db")
+    # rename_on_scan is exercised by tests/test_scanner_rename.py; other tests
+    # rely on stable file names.
+    return AppConfig(scan_root=scan_root, db_path=tmp_path / "data" / "images.db", rename_on_scan=False)
 
 
 @pytest.fixture

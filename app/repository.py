@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from app.models import Image, RawMetadata, ScanRun
+from app.models import Image, Lora, LoraUsage, RawMetadata, ScanRun
 
 IMAGE_COLUMNS = [
     "id", "content_hash", "file_path", "dir_path", "file_name", "file_size",
@@ -72,13 +72,14 @@ def insert_scan_run(conn: sqlite3.Connection, run: ScanRun) -> int:
         INSERT INTO scan_runs (
             started_at, finished_at, scanned_count, created_count, updated_count,
             missing_count, extract_failed_count, thumbnail_generated_count,
-            thumbnail_failed_count, error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            thumbnail_failed_count, renamed_count, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run.started_at, run.finished_at, run.scanned_count, run.created_count,
             run.updated_count, run.missing_count, run.extract_failed_count,
-            run.thumbnail_generated_count, run.thumbnail_failed_count, run.error,
+            run.thumbnail_generated_count, run.thumbnail_failed_count, run.renamed_count,
+            run.error,
         ),
     )
     return int(cur.lastrowid)
@@ -108,6 +109,10 @@ def _list_where(filters: dict[str, Any]) -> tuple[str, list[Any]]:
         clauses.append("presence = 'missing'")
     elif not filters.get("include_missing"):
         clauses.append("presence = 'active'")
+    lora_id = filters.get("lora")
+    if lora_id is not None:
+        clauses.append("id IN (SELECT image_id FROM image_loras WHERE lora_id = ?)")
+        params.append(lora_id)
     dir_path = filters.get("dir")
     recursive = filters.get("recursive", True)
     if dir_path is not None:
@@ -246,3 +251,125 @@ def count_favorites_active(conn: sqlite3.Connection) -> int:
 
 def count_missing(conn: sqlite3.Connection) -> int:
     return int(conn.execute("SELECT COUNT(*) FROM images WHERE presence = 'missing'").fetchone()[0])
+
+
+# --- loras --------------------------------------------------------------------
+
+LORA_COLUMNS = [
+    "id", "name", "file_name", "file_size", "file_mtime", "presence",
+    "trigger_words", "memo", "created_at", "updated_at",
+]
+_LORA_SELECT = (
+    "SELECT " + ", ".join("l." + c for c in LORA_COLUMNS)
+    + ", (SELECT COUNT(*) FROM image_loras il JOIN images i ON i.id = il.image_id"
+    + "    WHERE il.lora_id = l.id AND i.presence = 'active') AS image_count"
+    + " FROM loras l"
+)
+
+
+def _row_to_lora(row: sqlite3.Row) -> Lora:
+    data = {col: row[col] for col in LORA_COLUMNS}
+    return Lora(**data, image_count=int(row["image_count"]))
+
+
+def list_loras(conn: sqlite3.Connection) -> list[Lora]:
+    rows = conn.execute(_LORA_SELECT + " ORDER BY l.name").fetchall()
+    return [_row_to_lora(r) for r in rows]
+
+
+def get_lora(conn: sqlite3.Connection, lora_id: int) -> Lora | None:
+    row = conn.execute(_LORA_SELECT + " WHERE l.id = ?", (lora_id,)).fetchone()
+    return _row_to_lora(row) if row else None
+
+
+def find_lora_by_name(conn: sqlite3.Connection, name: str) -> Lora | None:
+    row = conn.execute(_LORA_SELECT + " WHERE l.name = ?", (name,)).fetchone()
+    return _row_to_lora(row) if row else None
+
+
+def upsert_lora_by_name(conn: sqlite3.Connection, name: str, now: str) -> int:
+    """Return the id for ``name``, inserting a presence='unknown' row when first seen."""
+    existing = conn.execute("SELECT id FROM loras WHERE name = ?", (name,)).fetchone()
+    if existing:
+        return int(existing["id"])
+    cur = conn.execute(
+        """
+        INSERT INTO loras (name, file_name, file_size, file_mtime, presence, created_at, updated_at)
+        VALUES (?, ?, NULL, NULL, 'unknown', ?, ?)
+        """,
+        (name, name.rsplit("/", 1)[-1], now, now),
+    )
+    return int(cur.lastrowid)
+
+
+def set_lora_file(
+    conn: sqlite3.Connection, lora_id: int, file_size: int, file_mtime: str, now: str
+) -> None:
+    conn.execute(
+        "UPDATE loras SET file_size = ?, file_mtime = ?, presence = 'active', updated_at = ? WHERE id = ?",
+        (file_size, file_mtime, now, lora_id),
+    )
+
+
+def mark_loras_missing_except(conn: sqlite3.Connection, seen_ids: set[int], now: str) -> int:
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS seen_lora_ids (id INTEGER PRIMARY KEY)")
+    conn.execute("DELETE FROM seen_lora_ids")
+    conn.executemany("INSERT INTO seen_lora_ids (id) VALUES (?)", ((i,) for i in seen_ids))
+    cur = conn.execute(
+        """
+        UPDATE loras SET presence = 'missing', updated_at = ?
+         WHERE presence = 'active' AND id NOT IN (SELECT id FROM seen_lora_ids)
+        """,
+        (now,),
+    )
+    conn.execute("DELETE FROM seen_lora_ids")
+    return int(cur.rowcount)
+
+
+def update_lora_notes(
+    conn: sqlite3.Connection, lora_id: int, trigger_words: str | None, memo: str | None, now: str
+) -> bool:
+    sets = ["updated_at = ?"]
+    params: list[Any] = [now]
+    if trigger_words is not None:
+        sets.append("trigger_words = ?")
+        params.append(trigger_words)
+    if memo is not None:
+        sets.append("memo = ?")
+        params.append(memo)
+    params.append(lora_id)
+    cur = conn.execute(f"UPDATE loras SET {', '.join(sets)} WHERE id = ?", params)
+    return cur.rowcount == 1
+
+
+def replace_image_loras(
+    conn: sqlite3.Connection, image_id: int, usages: list[LoraUsage], now: str
+) -> None:
+    conn.execute("DELETE FROM image_loras WHERE image_id = ?", (image_id,))
+    for usage in usages:
+        lora_id = upsert_lora_by_name(conn, usage.name, now)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO image_loras (image_id, lora_id, strength_model, strength_clip)
+            VALUES (?, ?, ?, ?)
+            """,
+            (image_id, lora_id, usage.strength_model, usage.strength_clip),
+        )
+
+
+def get_image_loras(conn: sqlite3.Connection, image_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT l.id, l.name, l.presence, l.trigger_words, il.strength_model, il.strength_clip
+          FROM image_loras il JOIN loras l ON l.id = il.lora_id
+         WHERE il.image_id = ?
+         ORDER BY l.name
+        """,
+        (image_id,),
+    ).fetchall()
+
+
+def iter_raw_prompts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT image_id, prompt_json FROM image_raw_metadata WHERE prompt_json IS NOT NULL"
+    ).fetchall()

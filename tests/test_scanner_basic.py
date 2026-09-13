@@ -10,7 +10,7 @@ from tests.conftest import make_png
 
 
 def test_scan_root_missing_raises_and_changes_nothing(tmp_path: Path, conn):
-    cfg = AppConfig(scan_root=tmp_path / "missing", db_path=tmp_path / "db.sqlite")
+    cfg = AppConfig(scan_root=tmp_path / "missing", db_path=tmp_path / "db.sqlite", rename_on_scan=False)
     with pytest.raises(scanner.ScanRootNotFound):
         scanner.run_scan(cfg, conn)
     assert repository.count_images(conn) == 0

@@ -6,7 +6,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +23,9 @@ log = logging.getLogger(__name__)
 
 HASH_CHUNK_SIZE = 64 * 1024
 
+# FR-40 naming rule: <file mtime, local time>_<uuid4 first 8 hex>.png
+CANONICAL_NAME_RE = re.compile(r"^\d{8}T\d{6}_[0-9a-f]{8}\.png$")
+
 
 class ScanRootNotFound(Exception):
     """scan_root does not exist; nothing was modified (FR-24)."""
@@ -33,6 +38,31 @@ def utc_now() -> str:
 def mtime_to_iso(ts: float) -> str:
     # 確認事項 #18: second precision, UTC.
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def is_canonical_name(name: str) -> bool:
+    return CANONICAL_NAME_RE.match(name) is not None
+
+
+def canonical_name_for(path: Path) -> str:
+    stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%dT%H%M%S")
+    return f"{stamp}_{uuid.uuid4().hex[:8]}.png"
+
+
+def rename_to_canonical(path: Path) -> Path:
+    """Rename ``path`` in place to the FR-40 pattern; return the (possibly unchanged) path.
+
+    Only the name changes: same directory, same bytes, and ``rename`` keeps mtime.
+    """
+    if is_canonical_name(path.name):
+        return path
+    for _ in range(8):
+        target = path.with_name(canonical_name_for(path))
+        if target.exists():
+            continue
+        path.rename(target)
+        return target
+    raise OSError(f"could not find a free canonical name for {path}")
 
 
 def sha256_of_file(path: Path) -> str:
@@ -103,20 +133,31 @@ def _text_chunk(value: object) -> str | None:
     return str(value)
 
 
-def extract_metadata_columns(info: ImageInfo) -> tuple[dict, str]:
-    """Map raw chunks to image columns; return (columns, extraction_status) (design §4)."""
+def parse_prompt(prompt_text: str | None) -> dict | None:
+    """Parse the ``prompt`` chunk; None when absent or not a JSON object."""
+    if prompt_text is None:
+        return None
+    try:
+        prompt = json.loads(prompt_text)
+    except ValueError:
+        return None
+    return prompt if isinstance(prompt, dict) else None
+
+
+def extract_metadata_columns(info: ImageInfo) -> tuple[dict, str, dict | None]:
+    """Map raw chunks to image columns; return (columns, extraction_status, parsed prompt)."""
     if info.prompt_text is None and info.workflow_text is None:
-        return {}, "none"
-    meta = comfy_metadata.ExtractedMetadata()
-    if info.prompt_text is not None:
+        return {}, "none", None
+    prompt = parse_prompt(info.prompt_text)
+    if prompt is not None:
         try:
-            prompt = json.loads(info.prompt_text)
             meta = comfy_metadata.extract(prompt)
-        except Exception as exc:  # noqa: BLE001 - 確認事項 #16: unparsable -> partial
+        except Exception as exc:  # noqa: BLE001 - never let a weird graph stop the scan
             log.warning("prompt metadata could not be analysed: %s", exc)
             meta = comfy_metadata.ExtractedMetadata().finalize()
     else:
-        meta = meta.finalize()
+        # 確認事項 #16: workflow only, or unparsable prompt -> partial with nothing extracted
+        meta = comfy_metadata.ExtractedMetadata().finalize()
     columns = {
         "positive_prompt": meta.positive_prompt,
         "negative_prompt": meta.negative_prompt,
@@ -129,7 +170,7 @@ def extract_metadata_columns(info: ImageInfo) -> tuple[dict, str]:
         "gen_width": meta.gen_width,
         "gen_height": meta.gen_height,
     }
-    return columns, meta.status
+    return columns, meta.status, prompt
 
 
 def run_scan(config: AppConfig, conn: sqlite3.Connection) -> ScanRun:
@@ -146,6 +187,12 @@ def run_scan(config: AppConfig, conn: sqlite3.Connection) -> ScanRun:
 
     for path in iter_png_files(scan_root, config.thumbnail_dir_name):
         run.scanned_count += 1
+        if config.rename_on_scan and not is_canonical_name(path.name):
+            try:
+                path = rename_to_canonical(path)
+                run.renamed_count += 1
+            except OSError as exc:
+                log.warning("cannot rename %s: %s", path, exc)
         try:
             content_hash = sha256_of_file(path)
         except OSError as exc:
@@ -205,7 +252,7 @@ def _register_new(
 ) -> int:
     stat = path.stat()
     info = read_image_info(path)
-    columns, extraction_status = extract_metadata_columns(info) if info else ({}, "none")
+    columns, extraction_status, prompt = extract_metadata_columns(info) if info else ({}, "none", None)
     values = {
         "content_hash": content_hash,
         "file_path": file_path,
@@ -229,6 +276,8 @@ def _register_new(
     run.created_count += 1
     if info and (info.prompt_text is not None or info.workflow_text is not None):
         repository.insert_raw_metadata(conn, image_id, info.prompt_text, info.workflow_text)
+    if prompt is not None:
+        record_lora_usage(conn, image_id, prompt, now)
     if extraction_status == "partial":
         # 確認事項 #3: extract_failed_count = newly registered images left partial.
         run.extract_failed_count += 1
@@ -237,6 +286,17 @@ def _register_new(
     else:
         _make_thumbnail(conn, config, path, image_id, run)
     return image_id
+
+
+def record_lora_usage(conn: sqlite3.Connection, image_id: int, prompt: dict, now: str) -> int:
+    """Link the image to every LoRA its workflow references; returns the number of links."""
+    try:
+        usages = comfy_metadata.extract_loras(prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("lora extraction failed for image %s: %s", image_id, exc)
+        return 0
+    repository.replace_image_loras(conn, image_id, usages, now)
+    return len(usages)
 
 
 def _needs_thumbnail(image: Image) -> bool:
