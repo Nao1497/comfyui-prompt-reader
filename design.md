@@ -1,6 +1,6 @@
 # design.md
 
-前提: [requirements.md](./requirements.md) の FR-1 〜 FR-32 / AC-1 〜 AC-22 を満たす。
+前提: [requirements.md](./requirements.md) の FR-1 〜 FR-52 / AC-1 〜 AC-38 を満たす。
 
 ---
 
@@ -17,7 +17,8 @@
 - Web フレームワーク: FastAPI
 - ASGI サーバ: uvicorn（アプリケーション内から起動する。外部プロセス管理を前提としない）
 - 画像処理: Pillow（PNG の tEXt チャンク読み取り、WebP 書き出しの両方に使用）
-- DB: SQLite（標準ライブラリ `sqlite3` を直接使用。ORM は導入しない）
+- アップロード受け取り: python-multipart（タグ CSV の受け取りにのみ使用）
+- DB: SQLite（標準ライブラリ `sqlite3` を直接使用。ORM は導入しない）。辞書の全列検索に FTS5 の trigram トークナイザを使う
 
 ### フロントエンド
 
@@ -52,6 +53,8 @@ app/
 ├── comfy_metadata.py    # ComfyUI グラフ解析
 ├── thumbnailer.py       # WebP サムネイル生成
 ├── lora_scanner.py      # LoRA フォルダ走査と画像との関連付け（FR-41 / FR-42）
+├── prompt_tokens.py     # プロンプトの正規化と語の切り出し（FR-46）
+├── tag_importer.py      # タグ CSV の取り込みと関連付けの再構築（FR-45 / FR-48）
 ├── folders.py           # dir_path からのフォルダツリー導出
 ├── api.py               # FastAPI ルーティング
 └── static/
@@ -136,6 +139,58 @@ SQLite 設定:
 - 用途: 画像と LoRA の多対多（FR-42）
 - columns: `image_id` (FK images, CASCADE), `lora_id` (FK loras, CASCADE), `strength_model` (REAL), `strength_clip` (REAL)。PK は `(image_id, lora_id)`
 - indexes: `idx_image_loras_lora (lora_id)`
+
+### `tags`
+
+- 用途: 辞書 1 件（FR-45 / FR-49）
+- columns:
+  - `id` (INTEGER, PK, AUTOINCREMENT)
+  - `name` (TEXT, NOT NULL, UNIQUE) — CSV の `tag` 列の原文。アンダースコア区切りのまま保持する
+  - `name_normalized` (TEXT, NOT NULL, UNIQUE) — FR-46 の正規化を適用した形。照合はこの列で行う
+  - `category` (INTEGER, NOT NULL) / `category_name` (TEXT, NOT NULL)
+  - `post_count` (INTEGER, NOT NULL, default 0) — 検索結果と候補の並び順に使う
+  - `tag_created_at` (TEXT) — CSV の `created_at` 列。レコードの `created_at` と区別する
+  - `aliases` (TEXT, NOT NULL, default '') / `other_names` (TEXT, NOT NULL, default '') — CSV の原文をそのまま保持する
+  - `posts_url` (TEXT) / `wiki_url` (TEXT) / `has_wiki` (TEXT)
+  - `source` (TEXT, NOT NULL) — `csv` / `lora`
+  - `lora_id` (INTEGER) — `source = 'lora'` のとき登録元。`loras.id` を参照し `ON DELETE SET NULL`
+  - `created_at` / `updated_at` (TEXT, NOT NULL)
+- indexes:
+  - `uk_tags_name (name)` unique / `uk_tags_name_normalized (name_normalized)` unique
+  - `idx_tags_post_count (post_count DESC)`
+- `source = 'csv'` の行だけが CSV 取り込みで置き換えられる。`source = 'lora'` の行は残す（FR-49）
+
+### `tag_aliases`
+
+- 用途: 別名から正式タグへの解決（FR-47）
+- columns: `alias_normalized` (TEXT, NOT NULL), `tag_id` (INTEGER, NOT NULL, FK tags CASCADE)。PK は `(alias_normalized, tag_id)`
+- 照合時は `tags.name_normalized` を先に引き、見つからない場合にのみこの表を引く。これで正式名が別名より優先される
+
+### `tags_fts`
+
+- 用途: 辞書の全列検索（FR-51）
+- FTS5 の外部コンテンツ表。`content='tags'`, `content_rowid='id'`, `tokenize='trigram'`
+- 対象列: `name`, `name_normalized`, `aliases`, `other_names`, `category_name`
+- trigram を選んだ理由は、日本語を含む部分一致が索引で引けるため。詳細は §9
+
+### `image_prompt_tokens`
+
+- 用途: 画像のプロンプトから切り出した正規化済みの語（FR-48）
+- columns: `image_id` (INTEGER, NOT NULL, FK images CASCADE), `side` (TEXT, NOT NULL, `positive` / `negative`), `position` (INTEGER, NOT NULL), `token` (TEXT, NOT NULL)。PK は `(image_id, side, position)`
+- indexes: `idx_image_prompt_tokens_token (token)`
+- 辞書に無い語も保持する。辞書が増えたとき、画像を読み直さずに関連付けを作り直せる
+
+### `image_tags`
+
+- 用途: 画像と辞書タグの関連（FR-48）
+- columns: `image_id` (INTEGER, NOT NULL, FK images CASCADE), `tag_id` (INTEGER, NOT NULL, FK tags CASCADE)。PK は `(image_id, tag_id)`
+- indexes: `idx_image_tags_tag (tag_id, image_id)`
+- `side = 'positive'` の語からのみ作る。この表は `image_prompt_tokens` と `tags` の結合結果であり、いつでも作り直せる
+
+### `tag_imports`
+
+- 用途: CSV 取り込みの結果記録
+- columns: `id` (INTEGER, PK, AUTOINCREMENT), `started_at` / `finished_at` (TEXT), `file_name` (TEXT), `read_count` / `imported_count` / `skipped_count` / `alias_count` / `linked_image_count` (INTEGER, NOT NULL, default 0), `error` (TEXT)
 
 ### `scan_runs`
 
@@ -277,7 +332,66 @@ SQLite 設定:
 
 ---
 
-## 6. Endpoints Design
+## 6. Tag Dictionary Design
+
+### 正規化（FR-46）
+
+プロンプト文字列から語を切り出す手順。辞書側の `name` にも同じ正規化を適用して `name_normalized` を作る。
+
+1. カンマで分割する。
+2. 各断片について、重み指定 `(語:1.2)` と強調の括弧 `(語)` `[語]` `{語}` を取り除き、中身を取り出す。入れ子は内側まで解く。
+3. エスケープされた括弧 `\(` `\)` を通常の括弧に戻す。この段階で `hatsune_miku_(cosplay)` のようなタグ側の括弧と形が揃う。
+4. アンダースコアを半角空白に置き換える。
+5. 英字を小文字にする。
+6. 前後の空白を取り除く。空文字列になったものは捨てる。
+
+`<lora:...>` の記法、`BREAK`、埋め込み名は語として扱わない。表記ゆれの吸収は行わない。
+
+### 照合（FR-47 / FR-48）
+
+1. positive プロンプトと negative プロンプトの双方を上記で正規化し、`image_prompt_tokens` に出現順で保存する。
+2. `side = 'positive'` の語について `tags.name_normalized` と完全一致で引く。
+3. 見つからない語のみ `tag_aliases.alias_normalized` を引き、見つかれば正式タグとする。これにより正式名が別名より優先される。
+4. 一致したものを `image_tags` に入れる。一致しなかった語はそのまま `image_prompt_tokens` に残り、画像詳細で「辞書に無い語」として表示できる。
+
+関連付けの作り直しは、`image_prompt_tokens` と `tags` の結合で一括して行う。画像ファイルも生 JSON も読み直さない。
+
+### 取り込み（FR-45）
+
+`POST /tags/import` の処理順序。画像スキャンと同じロックを共有し、実行中の再要求は `409` を返す。
+
+1. アップロードされた CSV をヘッダ行付きとして読む。想定した列が無ければ `400 INVALID_TAG_CSV` を返し、辞書を変更しない。
+2. `source = 'csv'` の行と、それに紐づく別名を削除する。`source = 'lora'` の行は残す。
+3. 1 行ずつ正規化して挿入する。解釈できない行は飛ばして件数に数える。`source = 'lora'` の行と `name_normalized` が衝突した場合は CSV 側を優先し、既存の行を `csv` に切り替えて登録元の LoRA への参照を残す。
+4. `aliases` を分割して `tag_aliases` を作る。正式名として既に存在する別名は入れない。
+5. FTS5 の索引を作り直す。
+6. `image_prompt_tokens` と結合して `image_tags` を作り直す。
+7. 集計を `tag_imports` に記録して返す。
+
+### LoRA トリガーワードの登録（FR-49）
+
+`PUT /loras/{id}` で Trigger Words が保存されたとき、カンマで分割した各語を正規化して辞書へ登録する。
+
+- 既に同じ `name_normalized` の行があれば登録しない。CSV 由来の語と重複した場合は CSV 側をそのまま使う。
+- 新たに登録した語については、その語を持つ画像だけを `image_prompt_tokens` から引いて `image_tags` に追加する。辞書全体との結合は行わない。
+- LoRA から語が取り除かれても辞書からは消さない。その語で絞り込んだ一覧が突然変わることを避けるためで、不要になった語は辞書側で削除する。
+
+### 規模（NFR-5）
+
+1,081,663 行の CSV で測った値。
+
+| 処理 | 実測 |
+|---|---|
+| CSV の取り込みと索引作成 | 約 15 秒 |
+| FTS5 索引の作成 | 約 10 秒 |
+| プロンプト 30 語の照合 | 0.03 ミリ秒 |
+| 画像 5000 件の関連付け再構築 | 0.5 秒 |
+| 辞書の全列検索 | 50 〜 63 ミリ秒 |
+| 辞書が占める容量 | 約 390 メガバイト |
+
+---
+
+## 7. Endpoints Design
 
 ### 共通
 
@@ -294,7 +408,7 @@ SQLite 設定:
 }
 ```
 
-- エラーコード: `NOT_FOUND` / `INVALID_SCAN_ROOT` / `SCAN_IN_PROGRESS` / `FILE_MISSING` / `THUMBNAIL_UNAVAILABLE` / `VALIDATION_ERROR`
+- エラーコード: `NOT_FOUND` / `INVALID_SCAN_ROOT` / `INVALID_LORA_ROOT` / `INVALID_TAG_CSV` / `SCAN_IN_PROGRESS` / `FILE_MISSING` / `THUMBNAIL_UNAVAILABLE` / `VALIDATION_ERROR`
 
 ### `POST /scan`
 
@@ -379,6 +493,43 @@ SQLite 設定:
 
 - `loras`: `[{"id", "name", "presence", "triggerWords", "strengthModel", "strengthClip"}]`
 
+### `POST /tags/import`
+
+- request: `multipart/form-data` の `file`。ヘッダ行付きの CSV（FR-45）
+- flow: §6「取り込み」の手順。画像スキャンと同じロックを共有する
+- 列が想定と異なる → `400 INVALID_TAG_CSV`（辞書は変更しない）。実行中の再要求 → `409 SCAN_IN_PROGRESS`
+- 受け入れる上限を超えたファイル → `400 VALIDATION_ERROR`
+
+### `GET /tags/search`
+
+- query: `q`（部分一致。全列が対象）, `limit`（既定 50、最大 200）, `category`（任意）, `source`（任意）
+- flow: `tags_fts` を MATCH で引き、`post_count` の降順に返す（FR-51）
+- `q` は FR-46 の正規化を適用してから引く。利用者が空白区切りで入力してもアンダースコア区切りの名前に当たるようにするため
+- `q` が空 → 投稿数の多い順に `limit` 件を返す
+
+### `GET /tags/used`
+
+- 用途: 左ペインの一覧。登録画像で実際に使われているタグのみを返す
+- query: `limit`（既定 200、最大 1000）
+- flow: `image_tags` を集計し、`presence = 'active'` の画像の件数が多い順に返す
+
+### `GET /tags/{id}`
+
+- 辞書 1 件の全項目と、そのタグを使う画像の件数を返す（FR-52）
+- `source = 'lora'` の場合は登録元の LoRA を含める
+
+### `GET /images` の追加 query（タグ）
+
+- `tag` (integer, 繰り返し可) — 絞り込むタグ。未指定なら条件を付けない
+- `tag_match` (string, `and` / `or`、既定 `and`) — すべてを含むか、いずれかを含むか（FR-50）
+- `and` は `image_tags` を `GROUP BY` して `HAVING COUNT(DISTINCT tag_id)` が指定数に等しい行を採る。画像側から `EXISTS` を連ねる書き方より速い。根拠は §9
+- 他の絞り込み条件とは AND で組み合わせる
+
+### `GET /images/{id}` の追加項目（タグ）
+
+- `promptTokens`: positive プロンプトの語を出現順に並べたもの。`[{"token", "tag"}]` とし、辞書に無い語は `tag` を `null` とする
+- `tag` の中身は `{"id", "name", "category", "categoryName", "postCount", "aliases", "otherNames", "wikiUrl", "source", "loraId"}`
+
 ### `PUT /images/{id}/favorite`
 
 - request body: `{"is_favorite": true}`
@@ -387,7 +538,7 @@ SQLite 設定:
 
 ---
 
-## 7. API Contract
+## 8. API Contract
 
 ### POST /scan
 
@@ -524,6 +675,80 @@ Not Found Error: `404 Not Found`
 }
 ```
 
+### POST /tags/import
+
+Success Response: `200 OK`
+
+```json
+{
+  "tagImportId": 3,
+  "startedAt": "2026-09-13T06:02:11Z",
+  "finishedAt": "2026-09-13T06:02:36Z",
+  "fileName": "danbooru_tags.csv",
+  "readCount": 1081663,
+  "importedCount": 1081661,
+  "skippedCount": 2,
+  "aliasCount": 195383,
+  "linkedImageCount": 4821
+}
+```
+
+Invalid CSV Error: `400 Bad Request`
+
+```json
+{
+  "error": {
+    "code": "INVALID_TAG_CSV",
+    "message": "required column is missing: post_count"
+  }
+}
+```
+
+### GET /tags/search
+
+Success Response: `200 OK`
+
+```json
+{
+  "items": [
+    {
+      "id": 12,
+      "name": "long_hair",
+      "category": 0,
+      "categoryName": "general",
+      "postCount": 5123456,
+      "aliases": "longhair",
+      "otherNames": "ロングヘア, 長髪",
+      "postsUrl": "https://danbooru.donmai.us/posts?tags=long_hair",
+      "wikiUrl": "https://danbooru.donmai.us/wiki_pages/long_hair",
+      "hasWiki": "yes",
+      "source": "csv",
+      "loraId": null,
+      "imageCount": 312
+    }
+  ]
+}
+```
+
+### GET /images/{id} のタグ部分
+
+```json
+{
+  "promptTokens": [
+    {
+      "token": "masterpiece",
+      "tag": {"id": 3, "name": "masterpiece", "category": 5, "categoryName": "meta", "postCount": 812345, "source": "csv", "loraId": null}
+    },
+    {
+      "token": "long hair",
+      "tag": {"id": 12, "name": "long_hair", "category": 0, "categoryName": "general", "postCount": 5123456, "source": "csv", "loraId": null}
+    },
+    {"token": "sksartstyle", "tag": {"id": 900, "name": "sksartstyle", "category": null, "categoryName": "lora", "postCount": 0, "source": "lora", "loraId": 4}},
+    {"token": "an entirely made up phrase", "tag": null}
+  ]
+}
+```
+
 ### PUT /images/{id}/favorite
 
 Request:
@@ -545,7 +770,7 @@ Success Response: `200 OK`
 
 ---
 
-## 8. 決定事項の根拠（変更時に読む箇所）
+## 9. 決定事項の根拠（変更時に読む箇所）
 
 - **ORM を使わない**: テーブル2〜3個、クエリも単純なため。スキーマ変更時は `db.py` の初期化 SQL を直接編集する。
 - **カーソル方式にした**: 無限スクロール中にスキャンが走ると、ページ番号方式では項目のずれによる重複・欠落が発生する。並び順を `file_mtime DESC, id DESC` 固定にしたことで、カーソルは1組の値で表現できる。並び順の切り替えを追加する場合、並び順ごとにカーソル定義と索引が必要になる。
@@ -555,11 +780,16 @@ Success Response: `200 OK`
 - **サムネイル名を UUID 由来にした**: 内容ハッシュ由来にすると冪等になるが、指定された命名規則に従う。結果として、DB を破棄して再スキャンすると旧サムネイルが孤児として残る。運用上は `.thumbnails` を手動削除して再スキャンする。
 - **`gen_width` と `image_width` を分けた**: アップスケールノードを挟むと両者は一致しない。プロンプト再利用時に必要なのは `gen_width` のため、混同しないよう別列とする。
 - **リネームをハッシュ算出より前に行う**: リネーム後のパスで登録・更新するため、登録済み画像のリネームは FR-4 のパス更新として扱われ、`updated_count` にも数えられる。元ファイル名は保持しない（必要になれば `original_name` 列の追加を検討する）。
+- **タグの照合を完全一致に限った**: 表記ゆれの吸収や部分一致は、誤った関連付けを生んだときに利用者が原因を追えない。正規化の規則を FR-46 の 6 手順に固定し、当たらない語は「辞書に無い語」として画面に出すほうが、追加すべき語がはっきりする。
+- **画像側に正規化済みの語を保存する**: 一致した組み合わせだけを保存すると、辞書へ語を 1 つ足すたびに全画像のプロンプトを解析し直すことになる。語を保存しておけば辞書との結合だけで済み、画像 5000 件で 0.5 秒だった。LoRA のトリガーワードを日常的に登録する使い方が前提なので、この差が効く。
+- **辞書の検索に FTS5 の trigram を使う**: 全列に部分一致をかけると 1,081,663 行で 229 〜 387 ミリ秒かかり、入力のたびに引く用途に耐えない。trigram の索引なら 50 〜 63 ミリ秒で、日本語の部分一致も引ける。代償は索引の 141 メガバイトと、取り込み時の 10 秒である。前方一致に限ればこの索引は不要になるので、容量を切り詰める必要が出たらここを見直す。
+- **タグの AND を GROUP BY で書く**: 画像側から `EXISTS` を連ねると、画像 5 万件で 33.9 ミリ秒かかった。`image_tags` の索引から出発して `GROUP BY` と `HAVING` で絞ると 0.9 ミリ秒だった。タグの絞り込みは件数が少ないほうから辿る。
+- **LoRA 絞り込みとタグ絞り込みを両方持つ**: 前者はワークフローの `lora_name` を根拠に「その LoRA で生成した画像」を返し、後者はプロンプトの文字列を根拠に「その語を書いた画像」を返す。LoRA を読み込んだが語を書かなかった画像、語だけ使い回して LoRA を外した画像で結果が食い違う。どちらも意味のある問いなので片方に寄せない。
 - **一覧でプロンプトを返さない**: 1件あたりのプロンプトが長く、100件分を返すとレスポンスが肥大するため。プロンプト検索を追加する場合はここを見直す。
 
 ---
 
-## 9. Frontend Layout
+## 10. Frontend Layout
 
 3ペイン構成とする。
 
@@ -567,7 +797,11 @@ Success Response: `200 OK`
 - **中央ペイン**: サムネイルのグリッド。CSS Grid の `grid-template-columns: repeat(auto-fill, minmax(<cell>px, 1fr))` とし、`<cell>` をスライダーで `grid_min_cell` 〜 `grid_max_cell` の範囲で変更する。
   - 末尾付近までスクロールした時点で `nextCursor` を用いて次を取得する（IntersectionObserver）。
   - 絞り込み条件を変更した際はカーソルと取得済み項目を破棄して先頭から取り直す。
+- **左ペイン（タグ）**: 「タグ CSV を取り込む」ボタンと、`GET /tags/used` による使用中タグの一覧。件数付きで表示する。辞書全体は検索欄から `GET /tags/search` で引く。辞書は 100 万件規模なので一覧には出さない。
+  - タグは複数選択でき、選択中のものを上部に並べる。「すべて含む」と「いずれかを含む」を切り替えるトグルを置く。
+  - 区分ごとに色を変える。`source = 'lora'` の語は独自の区分として扱い、選択すると右ペインに登録元の LoRA への導線を出す。
 - **左ペイン（LoRA）**: 「LoRA スキャン」ボタンと `GET /loras` の一覧（使用件数、`missing` / `unknown` バッジ）。選択すると一覧を `lora` で絞り込み、右ペインに LoRA エディタ（ファイル情報、Trigger Words、メモ、保存、Trigger Words のコピー）を表示する。
 - **右ペイン**: 選択中画像の情報。使用 LoRA（strength と Trigger Words、コピーボタン）を表示し、LoRA 名から LoRA エディタへ移動できる。`GET /images/{id}` の結果を表示する。
   - positive / negative プロンプトはそれぞれ独立したコピーボタンを持つ。コピー対象は API が返した文字列そのものとし、表示上の整形を反映しない（FR-9）。
   - `extractionStatus` が `partial` / `none` の場合、取得できなかった項目である旨を表示する。生メタデータへのリンクを置く。
+  - positive プロンプトは原文の表示とは別に、`promptTokens` を語ごとの一覧としても表示する。各語に区分・投稿数・和名を添え、選ぶとそのタグで一覧を絞り込む。辞書に無い語はその旨を示し、LoRA のトリガーワード由来の語からは LoRA の画面へ移動できる。
