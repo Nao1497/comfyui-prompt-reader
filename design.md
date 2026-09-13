@@ -147,7 +147,7 @@ SQLite 設定:
   - `id` (INTEGER, PK, AUTOINCREMENT)
   - `name` (TEXT, NOT NULL, UNIQUE) — CSV の `tag` 列の原文。アンダースコア区切りのまま保持する
   - `name_normalized` (TEXT, NOT NULL, UNIQUE) — FR-46 の正規化を適用した形。照合はこの列で行う
-  - `category` (INTEGER, NOT NULL) / `category_name` (TEXT, NOT NULL)
+  - `category` (INTEGER) / `category_name` (TEXT, NOT NULL) — LoRA 由来の語は `category` が NULL で `category_name = 'lora'`
   - `post_count` (INTEGER, NOT NULL, default 0) — 検索結果と候補の並び順に使う
   - `tag_created_at` (TEXT) — CSV の `created_at` 列。レコードの `created_at` と区別する
   - `aliases` (TEXT, NOT NULL, default '') / `other_names` (TEXT, NOT NULL, default '') — CSV の原文をそのまま保持する

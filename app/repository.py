@@ -373,3 +373,37 @@ def iter_raw_prompts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT image_id, prompt_json FROM image_raw_metadata WHERE prompt_json IS NOT NULL"
     ).fetchall()
+
+
+# --- prompt tokens (FR-48) ----------------------------------------------------
+
+def replace_prompt_tokens(
+    conn: sqlite3.Connection, image_id: int, positive: list[str], negative: list[str]
+) -> None:
+    """Store the normalised words of both prompts, in order. Unknown words are kept too."""
+    conn.execute("DELETE FROM image_prompt_tokens WHERE image_id = ?", (image_id,))
+    rows = [(image_id, "positive", i, t) for i, t in enumerate(positive)]
+    rows += [(image_id, "negative", i, t) for i, t in enumerate(negative)]
+    conn.executemany(
+        "INSERT INTO image_prompt_tokens (image_id, side, position, token) VALUES (?, ?, ?, ?)", rows
+    )
+
+
+def get_prompt_tokens(conn: sqlite3.Connection, image_id: int, side: str = "positive") -> list[str]:
+    rows = conn.execute(
+        "SELECT token FROM image_prompt_tokens WHERE image_id = ? AND side = ? ORDER BY position",
+        (image_id, side),
+    ).fetchall()
+    return [r["token"] for r in rows]
+
+
+def image_ids_without_tokens(conn: sqlite3.Connection) -> list[tuple[int, str | None, str | None]]:
+    """Images that have a prompt but no stored tokens (registered before FR-48)."""
+    rows = conn.execute(
+        """
+        SELECT id, positive_prompt, negative_prompt FROM images
+         WHERE (positive_prompt IS NOT NULL OR negative_prompt IS NOT NULL)
+           AND NOT EXISTS (SELECT 1 FROM image_prompt_tokens t WHERE t.image_id = images.id)
+        """
+    ).fetchall()
+    return [(int(r["id"]), r["positive_prompt"], r["negative_prompt"]) for r in rows]
