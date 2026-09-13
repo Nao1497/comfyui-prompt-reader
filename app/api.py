@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import logging
 import sqlite3
 import threading
@@ -139,6 +140,15 @@ class FavoriteBody(BaseModel):
     is_favorite: StrictBool
 
 
+def _parse_or_raw(text: str | None):
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
 # --- serialisation ------------------------------------------------------------
 
 def list_item_to_json(row: sqlite3.Row) -> dict:
@@ -233,6 +243,15 @@ def _register_routes(app: FastAPI) -> None:
         if img is None:
             raise not_found()
         return image_to_json(img)
+
+    @app.get("/images/{image_id}/raw-metadata")
+    def get_raw_metadata(request: Request, image_id: int):
+        """AC-8: parsed prompt/workflow JSON. 確認事項 #13: {"prompt", "workflow"}; unparsable -> raw string."""
+        with with_db(request) as conn:
+            raw = repository.get_raw_metadata(conn, image_id)
+        if raw is None:
+            raise not_found("raw metadata not found")
+        return {"prompt": _parse_or_raw(raw.prompt_json), "workflow": _parse_or_raw(raw.workflow_json)}
 
     @app.put("/images/{image_id}/favorite")
     def put_favorite(request: Request, image_id: int, body: FavoriteBody):
