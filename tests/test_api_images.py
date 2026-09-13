@@ -162,3 +162,62 @@ def test_filters_combine_with_cursor(client, scan_root):
     got = [i["id"] for i in first["items"] + second["items"]]
     assert sorted(got) == ids[:4]
     assert second["nextCursor"] is None
+
+
+# --- dir / recursive (TASK-18) ------------------------------------------------
+
+def _names(resp):
+    return sorted(i["filePath"] for i in resp.json()["items"])
+
+
+def _seed_tree(client, scan_root):
+    for i, rel in enumerate(["root.png", "a/1.png", "a/b/2.png", "a/b/c/3.png", "ab/4.png"]):
+        make_png(scan_root / rel, seed=i + 1)
+    client.post("/scan")
+
+
+def test_dir_non_recursive_returns_direct_children_only(client, scan_root):
+    _seed_tree(client, scan_root)
+    resp = client.get("/images", params={"dir": "a", "recursive": "false"})
+    assert _names(resp) == ["a/1.png"]
+    assert resp.json()["totalCount"] == 1
+
+
+def test_dir_recursive_includes_subfolders_but_not_prefix_siblings(client, scan_root):
+    _seed_tree(client, scan_root)
+    resp = client.get("/images", params={"dir": "a", "recursive": "true"})
+    assert _names(resp) == ["a/1.png", "a/b/2.png", "a/b/c/3.png"]
+    assert resp.json()["totalCount"] == 3
+    # default recursive=true
+    assert _names(client.get("/images", params={"dir": "a/b"})) == ["a/b/2.png", "a/b/c/3.png"]
+
+
+def test_empty_dir_semantics(client, scan_root):
+    _seed_tree(client, scan_root)
+    root_only = client.get("/images", params={"dir": "", "recursive": "false"})
+    assert _names(root_only) == ["root.png"]
+    everything = client.get("/images", params={"dir": "", "recursive": "true"})
+    assert everything.json()["totalCount"] == 5
+    assert client.get("/images").json()["totalCount"] == 5
+
+
+def test_dir_combines_with_other_filters_and_cursor(client, scan_root):
+    _seed_tree(client, scan_root)
+    ids = {i["filePath"]: i["id"] for i in client.get("/images").json()["items"]}
+    client.put(f"/images/{ids['a/b/2.png']}/favorite", json={"is_favorite": True})
+    client.put(f"/images/{ids['ab/4.png']}/favorite", json={"is_favorite": True})
+
+    resp = client.get("/images", params={"dir": "a", "favorite_only": "true"})
+    assert _names(resp) == ["a/b/2.png"]
+
+    first = client.get("/images", params={"dir": "a", "limit": 2}).json()
+    second = client.get("/images", params={"dir": "a", "limit": 2, "cursor": first["nextCursor"]}).json()
+    got = sorted(i["filePath"] for i in first["items"] + second["items"])
+    assert got == ["a/1.png", "a/b/2.png", "a/b/c/3.png"]
+
+
+def test_unknown_dir_is_empty_not_error(client, scan_root):
+    _seed_tree(client, scan_root)
+    resp = client.get("/images", params={"dir": "nope"})
+    assert resp.status_code == 200
+    assert resp.json()["items"] == [] and resp.json()["totalCount"] == 0

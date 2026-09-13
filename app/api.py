@@ -234,12 +234,17 @@ def _register_routes(app: FastAPI) -> None:
         favorite_only: bool = False,
         include_missing: bool = False,
         missing_only: bool = False,
+        dir: str | None = None,
+        recursive: bool = True,
     ):
         # 確認事項 #10(a): missing_only is an addition for the "見つからない" pane.
+        # 確認事項 #8: dir omitted -> no folder filter; dir="" -> root (see repository).
         filters: dict = {
             "favorite_only": favorite_only,
             "include_missing": include_missing,
             "missing_only": missing_only,
+            "dir": dir.strip("/") if dir is not None else None,
+            "recursive": recursive,
         }
         decoded = decode_cursor(cursor) if cursor is not None else None
         with with_db(request) as conn:
