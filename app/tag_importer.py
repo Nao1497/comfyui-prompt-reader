@@ -225,3 +225,24 @@ def ensure_prompt_tokens(conn: sqlite3.Connection) -> int:
     for image_id, positive, negative in pending:
         scanner.store_prompt_tokens(conn, image_id, positive, negative)
     return len(pending)
+
+
+def register_trigger_words(conn: sqlite3.Connection, lora_id: int, trigger_words: str, now: str) -> int:
+    """FR-49: add each comma-separated trigger word to the dictionary as a LoRA-sourced tag.
+
+    Words are normalised like prompt fragments so they match how they appear in
+    prompts. Existing words (CSV or LoRA) are left alone; new ones are indexed and
+    linked to the images that already carry them. Nothing is ever removed here.
+    """
+    added = 0
+    for raw in trigger_words.split(","):
+        name = raw.strip()
+        nn = prompt_tokens.normalize(name)
+        if not nn or repository.find_tag_by_normalized(conn, nn) is not None:
+            continue
+        if conn.execute("SELECT 1 FROM tags WHERE name = ?", (name,)).fetchone():
+            name = nn  # display name clashes with a differently-normalised tag; fall back
+        tag_id = repository.insert_lora_tag(conn, name, nn, lora_id, now)
+        repository.link_token_to_tag(conn, nn, tag_id)
+        added += 1
+    return added

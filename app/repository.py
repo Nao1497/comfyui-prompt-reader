@@ -610,3 +610,22 @@ def resolve_prompt_tokens(conn: sqlite3.Connection, image_id: int) -> list[tuple
             ):
                 found.setdefault(row["alias"], _row_to_tag(row))
     return [(t, found.get(t)) for t in tokens]
+
+
+def insert_lora_tag(conn: sqlite3.Connection, name: str, name_normalized: str, lora_id: int, now: str) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO tags (name, name_normalized, category, category_name, post_count, source, lora_id,
+                          created_at, updated_at)
+        VALUES (?, ?, NULL, 'lora', 0, 'lora', ?, ?, ?)
+        """,
+        (name, name_normalized, lora_id, now, now),
+    )
+    tag_id = int(cur.lastrowid)
+    if db.fts_available(conn):
+        conn.execute(
+            "INSERT INTO tags_fts (rowid, name_normalized, aliases, other_names, category_name)"
+            " VALUES (?, ?, '', '', 'lora')",
+            (tag_id, name_normalized),
+        )
+    return tag_id

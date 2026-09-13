@@ -398,8 +398,12 @@ def _register_routes(app: FastAPI) -> None:
     @app.put("/loras/{lora_id}")
     def put_lora(request: Request, lora_id: int, body: LoraNotesBody):
         """Edit trigger words / memo. File fields come only from the scan."""
+        now = scanner.utc_now()
         with with_db(request) as conn:
-            ok = repository.update_lora_notes(conn, lora_id, body.trigger_words, body.memo, scanner.utc_now())
+            ok = repository.update_lora_notes(conn, lora_id, body.trigger_words, body.memo, now)
+            if ok and body.trigger_words is not None:
+                # FR-49: trigger words become dictionary entries the moment they are saved.
+                tag_importer.register_trigger_words(conn, lora_id, body.trigger_words, now)
             conn.commit()
             lora = repository.get_lora(conn, lora_id) if ok else None
         if lora is None:
