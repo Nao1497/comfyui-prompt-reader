@@ -21,6 +21,7 @@ def test_defaults_are_filled_in(tmp_path: Path):
     assert cfg.db_path == tmp_path / "data" / "images.db"
     assert cfg.host == "127.0.0.1"
     assert cfg.port == 8000
+    assert cfg.rename_on_scan is True
     assert cfg.thumbnail_dir == Path("/images/.thumbnails")
 
 
@@ -38,6 +39,7 @@ def test_all_values_can_be_overridden(tmp_path: Path):
                 'db_path = "/var/lib/reader/images.db"',
                 'host = "0.0.0.0"',
                 "port = 9000",
+                "rename_on_scan = false",
             ]
         )
     )
@@ -53,6 +55,7 @@ def test_all_values_can_be_overridden(tmp_path: Path):
     assert cfg.db_path == Path("/var/lib/reader/images.db")
     assert cfg.host == "0.0.0.0"
     assert cfg.port == 9000
+    assert cfg.rename_on_scan is False
 
 
 def test_missing_scan_root_raises(tmp_path: Path):

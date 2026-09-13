@@ -500,6 +500,30 @@
 
 ---
 
+## 追加要望（PR #1 作成後）
+
+### TASK-23
+
+- ID: TASK-23
+- 目的: スキャン時に元画像を `YYYYMMDDTHHMMSS_<uuid4 先頭8桁>.png` へ自動リネームする（FR-40）
+- 対象ファイル:
+  - 変更: `app/config.py`（`rename_on_scan`）, `config.toml`
+  - 変更: `app/db.py`（`scan_runs.renamed_count` と既存 DB への列追加）, `app/models.py`, `app/repository.py`
+  - 変更: `app/scanner.py`（`is_canonical_name` / `rename_to_canonical`、ハッシュ算出前のリネーム）
+  - 変更: `app/api.py`（`renamedCount`）
+  - 変更: `requirements.md`（FR-40 / AC-28、Out of Scope / NFR-2 / AC-19 の改訂）, `design.md`
+  - 新規: `tests/test_scanner_rename.py`, `tests/test_db_migration.py`
+- 完了条件:
+  - 命名規則に合わないファイルが同一フォルダ内でリネームされ、内容ハッシュ・更新日時が不変（AC-28）
+  - 登録済み画像のリネームでレコードが増えず、パス更新とお気に入り維持（AC-28）
+  - 再スキャンで `renamedCount` が 0（AC-28）
+  - `rename_on_scan = false` でリネームしない。リネーム失敗時もスキャンが完了する
+  - 既存の DB に `renamed_count` 列が自動追加される
+  - 検証: `pytest tests/test_scanner_rename.py tests/test_db_migration.py`
+- 関連: FR-6, FR-40 / AC-28
+
+---
+
 ## AC 対応表
 
 | AC | 内容（要約） | 完了条件を持つタスク |
@@ -531,6 +555,7 @@
 | AC-25 | サブフォルダ含む / 含まない絞り込み | TASK-18 |
 | AC-26 | 逐次取得で重複なし・総件数一致 | TASK-6, TASK-19（UI） |
 | AC-27 | 最大表示でも実解像度を超えない | TASK-20 |
+| AC-28 | スキャン時の自動リネーム | TASK-23 |
 
 ---
 

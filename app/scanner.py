@@ -6,7 +6,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +23,9 @@ log = logging.getLogger(__name__)
 
 HASH_CHUNK_SIZE = 64 * 1024
 
+# FR-40 naming rule: <file mtime, local time>_<uuid4 first 8 hex>.png
+CANONICAL_NAME_RE = re.compile(r"^\d{8}T\d{6}_[0-9a-f]{8}\.png$")
+
 
 class ScanRootNotFound(Exception):
     """scan_root does not exist; nothing was modified (FR-24)."""
@@ -33,6 +38,31 @@ def utc_now() -> str:
 def mtime_to_iso(ts: float) -> str:
     # 確認事項 #18: second precision, UTC.
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def is_canonical_name(name: str) -> bool:
+    return CANONICAL_NAME_RE.match(name) is not None
+
+
+def canonical_name_for(path: Path) -> str:
+    stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%dT%H%M%S")
+    return f"{stamp}_{uuid.uuid4().hex[:8]}.png"
+
+
+def rename_to_canonical(path: Path) -> Path:
+    """Rename ``path`` in place to the FR-40 pattern; return the (possibly unchanged) path.
+
+    Only the name changes: same directory, same bytes, and ``rename`` keeps mtime.
+    """
+    if is_canonical_name(path.name):
+        return path
+    for _ in range(8):
+        target = path.with_name(canonical_name_for(path))
+        if target.exists():
+            continue
+        path.rename(target)
+        return target
+    raise OSError(f"could not find a free canonical name for {path}")
 
 
 def sha256_of_file(path: Path) -> str:
@@ -146,6 +176,12 @@ def run_scan(config: AppConfig, conn: sqlite3.Connection) -> ScanRun:
 
     for path in iter_png_files(scan_root, config.thumbnail_dir_name):
         run.scanned_count += 1
+        if config.rename_on_scan and not is_canonical_name(path.name):
+            try:
+                path = rename_to_canonical(path)
+                run.renamed_count += 1
+            except OSError as exc:
+                log.warning("cannot rename %s: %s", path, exc)
         try:
             content_hash = sha256_of_file(path)
         except OSError as exc:

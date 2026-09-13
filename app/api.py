@@ -120,6 +120,7 @@ def scan_run_to_json(run: ScanRun) -> dict:
         "extractFailedCount": run.extract_failed_count,
         "thumbnailGeneratedCount": run.thumbnail_generated_count,
         "thumbnailFailedCount": run.thumbnail_failed_count,
+        "renamedCount": run.renamed_count,
     }
 
 

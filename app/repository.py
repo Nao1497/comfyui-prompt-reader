@@ -72,13 +72,14 @@ def insert_scan_run(conn: sqlite3.Connection, run: ScanRun) -> int:
         INSERT INTO scan_runs (
             started_at, finished_at, scanned_count, created_count, updated_count,
             missing_count, extract_failed_count, thumbnail_generated_count,
-            thumbnail_failed_count, error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            thumbnail_failed_count, renamed_count, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run.started_at, run.finished_at, run.scanned_count, run.created_count,
             run.updated_count, run.missing_count, run.extract_failed_count,
-            run.thumbnail_generated_count, run.thumbnail_failed_count, run.error,
+            run.thumbnail_generated_count, run.thumbnail_failed_count, run.renamed_count,
+            run.error,
         ),
     )
     return int(cur.lastrowid)

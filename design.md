@@ -36,6 +36,7 @@
   - `grid_min_cell` / `grid_max_cell`: 一覧セル幅の下限・上限（既定 `96` / `320`、単位 px）
   - `db_path`: SQLite ファイルパス（既定 `./data/images.db`）
   - `host` / `port`（既定 `127.0.0.1` / `8000`）
+  - `rename_on_scan`: スキャン時の自動リネーム（FR-40）を行うか（既定 `true`）
 
 ### ディレクトリ構成
 
@@ -122,7 +123,7 @@ SQLite 設定:
   - `id` (INTEGER, PK, AUTOINCREMENT)
   - `started_at` (TEXT, NOT NULL)
   - `finished_at` (TEXT)
-  - `scanned_count` / `created_count` / `updated_count` / `missing_count` / `extract_failed_count` / `thumbnail_generated_count` / `thumbnail_failed_count` (INTEGER, NOT NULL, default 0)
+  - `scanned_count` / `created_count` / `updated_count` / `missing_count` / `extract_failed_count` / `thumbnail_generated_count` / `thumbnail_failed_count` / `renamed_count` (INTEGER, NOT NULL, default 0)
   - `error` (TEXT)
 
 ### リレーション方針
@@ -141,7 +142,8 @@ SQLite 設定:
 3. `scan_root` 配下を再帰走査し、拡張子 `.png`（大文字小文字を問わない）のファイルを列挙する。
    - `<thumbnail_dir_name>` 配下は走査対象から除外する（FR-32）。
    - 名前が `.` で始まるディレクトリは除外する。
-4. 各ファイルについて SHA-256 を算出する（64KB 単位のストリーム読み込み）。
+4. `rename_on_scan` が有効で、ファイル名が `^\d{8}T\d{6}_[0-9a-f]{8}\.png$` に合わない場合、同一ディレクトリ内で `<mtime のローカルタイム YYYYMMDDTHHMMSS>_<uuid4 先頭8桁>.png` にリネームする（FR-40）。衝突時は uuid を取り直す。`os.rename` は mtime を変更しないため更新日時は保たれる。失敗時は警告を記録し元の名前で続行する。以降の手順はリネーム後のパスで行う。
+   - 各ファイルについて SHA-256 を算出する（64KB 単位のストリーム読み込み）。
 5. `content_hash` で既存レコードを検索する。
    - 未登録 → 新規登録処理へ（6 以降）
    - 登録済みかつ `file_path` が一致 → `presence = 'active'` に更新するのみ。`thumbnail_status = 'failed'` の場合はサムネイル生成のみ再試行する（FR-29）
@@ -358,7 +360,8 @@ Success Response: `200 OK`
   "missingCount": 2,
   "extractFailedCount": 5,
   "thumbnailGeneratedCount": 37,
-  "thumbnailFailedCount": 1
+  "thumbnailFailedCount": 1,
+  "renamedCount": 37
 }
 ```
 
@@ -507,6 +510,7 @@ Success Response: `200 OK`
 - **サムネイル長辺を 768px にした**: 一覧セル幅の上限が 320px であり、高 DPI 環境での 2 倍表示（640px）を上回るため。`grid_max_cell` を広げる場合はこの値も見直す（FR-39 / AC-27）。
 - **サムネイル名を UUID 由来にした**: 内容ハッシュ由来にすると冪等になるが、指定された命名規則に従う。結果として、DB を破棄して再スキャンすると旧サムネイルが孤児として残る。運用上は `.thumbnails` を手動削除して再スキャンする。
 - **`gen_width` と `image_width` を分けた**: アップスケールノードを挟むと両者は一致しない。プロンプト再利用時に必要なのは `gen_width` のため、混同しないよう別列とする。
+- **リネームをハッシュ算出より前に行う**: リネーム後のパスで登録・更新するため、登録済み画像のリネームは FR-4 のパス更新として扱われ、`updated_count` にも数えられる。元ファイル名は保持しない（必要になれば `original_name` 列の追加を検討する）。
 - **一覧でプロンプトを返さない**: 1件あたりのプロンプトが長く、100件分を返すとレスポンスが肥大するため。プロンプト検索を追加する場合はここを見直す。
 
 ---

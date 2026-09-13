@@ -54,4 +54,5 @@ class ScanRun:
     extract_failed_count: int = 0
     thumbnail_generated_count: int = 0
     thumbnail_failed_count: int = 0
+    renamed_count: int = 0
     error: str | None = None

@@ -8,3 +8,5 @@ grid_max_cell = 320
 db_path = "./data/images.db"
 host = "127.0.0.1"
 port = 8000
+# FR-40: rename originals on scan to YYYYMMDDTHHMMSS_<uuid4 first 8 hex>.png (file mtime, local time)
+rename_on_scan = true

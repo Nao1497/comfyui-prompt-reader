@@ -58,9 +58,15 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     extract_failed_count      INTEGER NOT NULL DEFAULT 0,
     thumbnail_generated_count INTEGER NOT NULL DEFAULT 0,
     thumbnail_failed_count    INTEGER NOT NULL DEFAULT 0,
+    renamed_count             INTEGER NOT NULL DEFAULT 0,
     error                     TEXT
 );
 """
+
+# Columns added after the first release; applied to existing databases on start-up.
+MIGRATIONS: list[tuple[str, str, str]] = [
+    ("scan_runs", "renamed_count", "INTEGER NOT NULL DEFAULT 0"),
+]
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -80,8 +86,12 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create tables and indexes if they do not exist. Safe to call repeatedly."""
+    """Create tables and indexes if they do not exist, then add any missing columns."""
     conn.executescript(SCHEMA)
+    for table, column, decl in MIGRATIONS:
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     conn.commit()
 
 
