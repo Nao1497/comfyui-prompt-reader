@@ -159,6 +159,77 @@
   }, { root: $('#grid-wrap'), rootMargin: '400px 0px' });
   observer.observe(sentinel);
 
+  // --- left pane: collapsible sections (remembered per viewer) ----------------
+  const SECTIONS_KEY = 'leftSections';
+  const LEFT_WIDTH_KEY = 'leftWidth';
+  const LEFT_WIDTH_DEFAULT = 280;
+  const LEFT_WIDTH_MIN = 180;
+  const LEFT_WIDTH_MAX = 560;
+
+  function readSectionState() {
+    try { return JSON.parse(localStorage.getItem(SECTIONS_KEY) || '{}'); } catch (_) { return {}; }
+  }
+
+  function initSections() {
+    const state = readSectionState();
+    for (const sec of document.querySelectorAll('details.sec')) {
+      const key = sec.dataset.sec;
+      if (key in state) sec.open = state[key];
+      sec.addEventListener('toggle', () => {
+        const next = readSectionState();
+        next[key] = sec.open;
+        try { localStorage.setItem(SECTIONS_KEY, JSON.stringify(next)); } catch (_) { /* ignore */ }
+      });
+    }
+  }
+
+  /** Count shown on a section header, so a collapsed section still says how much is inside. */
+  function setSectionCount(id, n) {
+    const node = document.getElementById(id);
+    if (node) node.textContent = n === null || n === undefined ? '' : String(n);
+  }
+
+  // --- left pane: drag to resize ----------------------------------------------
+  function applyLeftWidth(px, persist = true) {
+    const w = Math.min(LEFT_WIDTH_MAX, Math.max(LEFT_WIDTH_MIN, Math.round(px)));
+    document.documentElement.style.setProperty('--left-w', `${w}px`);
+    if (persist) {
+      try { localStorage.setItem(LEFT_WIDTH_KEY, String(w)); } catch (_) { /* ignore */ }
+    }
+    return w;
+  }
+
+  function initLeftResizer() {
+    let saved = null;
+    try { saved = Number(localStorage.getItem(LEFT_WIDTH_KEY)) || null; } catch (_) { /* ignore */ }
+    applyLeftWidth(saved || LEFT_WIDTH_DEFAULT, false);
+
+    const handle = $('#left-resizer');
+    if (!handle) return;
+    let dragging = false;
+
+    handle.addEventListener('pointerdown', (ev) => {
+      dragging = true;
+      handle.setPointerCapture(ev.pointerId);
+      handle.classList.add('dragging');
+      document.body.classList.add('resizing');
+      ev.preventDefault();
+    });
+    handle.addEventListener('pointermove', (ev) => {
+      if (dragging) applyLeftWidth(ev.clientX);
+    });
+    const stop = (ev) => {
+      if (!dragging) return;
+      dragging = false;
+      try { handle.releasePointerCapture(ev.pointerId); } catch (_) { /* ignore */ }
+      handle.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+    };
+    handle.addEventListener('pointerup', stop);
+    handle.addEventListener('pointercancel', stop);
+    handle.addEventListener('dblclick', () => applyLeftWidth(LEFT_WIDTH_DEFAULT));
+  }
+
   // --- left pane: scan button, fixed items, folder tree ---------------------
   const scanBtn = $('#scan-btn');
   const scanResult = $('#scan-result');
@@ -174,6 +245,7 @@
       fixedItems.querySelector('[data-count="favorite"]').textContent = body.favoriteCount;
       fixedItems.querySelector('[data-count="missing"]').textContent = body.missingCount;
       folderTree.replaceChildren(...body.folders.map(renderFolder));
+      setSectionCount('count-folders', body.folders.length);
       highlightSelection();
     } catch (err) {
       statusEl.textContent = `フォルダ取得エラー: ${err.message}`;
@@ -239,6 +311,7 @@
       loras = body.items;
       loraList.replaceChildren(...loras.map(renderLoraItem));
       if (!loras.length) loraList.appendChild(el('li', { class: 'muted' }, '登録なし'));
+      setSectionCount('count-lora', loras.length);
       highlightSelection();
     } catch (err) {
       statusEl.textContent = `LoRA 取得エラー: ${err.message}`;
@@ -647,6 +720,7 @@
       for (const t of body.items) tagCache.set(t.id, t);
       tagUsedEl.replaceChildren(...body.items.map((t) => renderTagRow(t, String(t.imageCount))));
       if (!body.items.length) tagUsedEl.appendChild(el('li', { class: 'muted' }, '辞書に一致する語を持つ画像がありません'));
+      setSectionCount('count-tags', body.items.length);
       highlightSelection();
     } catch (err) {
       statusEl.textContent = `タグ取得エラー: ${err.message}`;
@@ -789,8 +863,10 @@
     applyCellSize(initial);
   }
 
-  window.app = { state, setFilter, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize, refreshFolders, refreshLoras, refreshUsedTags, selectFolder, selectFixed, selectLora, toggleTag, clearTags, getDetail: () => currentDetail };
+  window.app = { state, setFilter, applyLeftWidth, resetAndLoad, loadMore, selectImage, apiGet, applyCellSize, refreshFolders, refreshLoras, refreshUsedTags, selectFolder, selectFixed, selectLora, toggleTag, clearTags, getDetail: () => currentDetail };
 
+  initSections();
+  initLeftResizer();
   initCellSize();
   refreshFolders();
   refreshLoras();

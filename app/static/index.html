@@ -7,12 +7,13 @@
 <style>
   :root {
     --cell: 160px;
+    --left-w: 280px;
     --bg: #1e1f22; --panel: #26272b; --border: #3a3b40; --text: #e6e6e6; --muted: #9a9ba1; --accent: #4f8cff;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    display: grid; grid-template-columns: 240px 1fr 380px; grid-template-rows: 100vh;
+    display: grid; grid-template-columns: var(--left-w) 1fr 380px; grid-template-rows: 100vh;
     background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   .pane { overflow: auto; min-height: 0; }
@@ -44,6 +45,26 @@
   .cell .noimg { color: var(--muted); font-size: 11px; text-align: center; padding: 6px; word-break: break-all; }
   #sentinel { height: 1px; }
   #status { padding: 6px 12px; color: var(--muted); border-top: 1px solid var(--border); }
+  /* collapsible sections (left pane) */
+  details.sec { border-top: 1px solid var(--border); }
+  details.sec:first-of-type { border-top: none; }
+  details.sec > summary {
+    display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
+    list-style: none; padding: 10px 0 6px;
+    font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+  }
+  details.sec > summary::-webkit-details-marker { display: none; }
+  details.sec > summary::before { content: '\25be'; font-size: 10px; line-height: 1; width: 8px; }
+  details.sec:not([open]) > summary::before { content: '\25b8'; }
+  details.sec > summary:hover { color: var(--text); }
+  .sec-count { margin-left: auto; font-size: 11px; text-transform: none; letter-spacing: 0; }
+  /* drag handle for the left pane width */
+  #left-resizer {
+    position: fixed; top: 0; bottom: 0; left: var(--left-w); width: 7px; margin-left: -4px;
+    cursor: col-resize; z-index: 20; background: transparent;
+  }
+  #left-resizer:hover, #left-resizer.dragging { background: var(--accent); opacity: .55; }
+  body.resizing { cursor: col-resize; user-select: none; }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 12px 0 6px; }
   .placeholder { color: var(--muted); }
   .muted { color: var(--muted); }
@@ -120,31 +141,41 @@
     <button id="scan-btn" type="button">スキャン実行</button>
     <div id="scan-result" class="muted"></div>
 
-    <h2>表示</h2>
-    <ul id="fixed-items" class="tree">
-      <li class="item selected" data-kind="all"><span class="label">すべて</span><span class="count" data-count="all"></span></li>
-      <li class="item" data-kind="favorite"><span class="label">お気に入り</span><span class="count" data-count="favorite"></span></li>
-      <li class="item" data-kind="missing"><span class="label">見つからない</span><span class="count" data-count="missing"></span></li>
-    </ul>
+    <details class="sec" data-sec="view" open>
+      <summary>表示</summary>
+      <ul id="fixed-items" class="tree">
+        <li class="item selected" data-kind="all"><span class="label">すべて</span><span class="count" data-count="all"></span></li>
+        <li class="item" data-kind="favorite"><span class="label">お気に入り</span><span class="count" data-count="favorite"></span></li>
+        <li class="item" data-kind="missing"><span class="label">見つからない</span><span class="count" data-count="missing"></span></li>
+      </ul>
+    </details>
 
-    <h2>フォルダ</h2>
-    <label class="muted"><input type="checkbox" id="recursive" checked> サブフォルダを含む</label>
-    <ul id="folder-tree" class="tree"></ul>
+    <details class="sec" data-sec="folders" open>
+      <summary>フォルダ<span class="sec-count" id="count-folders"></span></summary>
+      <label class="muted"><input type="checkbox" id="recursive" checked> サブフォルダを含む</label>
+      <ul id="folder-tree" class="tree"></ul>
+    </details>
 
-    <h2>LoRA</h2>
-    <button id="lora-scan-btn" type="button">LoRA スキャン</button>
-    <div id="lora-scan-result" class="muted"></div>
-    <ul id="lora-list" class="tree"></ul>
+    <details class="sec" data-sec="lora" open>
+      <summary>LoRA<span class="sec-count" id="count-lora"></span></summary>
+      <button id="lora-scan-btn" type="button">LoRA スキャン</button>
+      <div id="lora-scan-result" class="muted"></div>
+      <ul id="lora-list" class="tree"></ul>
+    </details>
 
-    <h2>タグ</h2>
-    <input type="file" id="tag-csv" accept=".csv,text/csv" hidden>
-    <button id="tag-import-btn" type="button">タグ CSV を取り込む</button>
-    <div id="tag-import-result" class="muted"></div>
-    <input id="tag-search" type="search" placeholder="辞書を検索（全列）" autocomplete="off">
-    <ul id="tag-search-results" class="tree"></ul>
-    <div id="tag-used-head" class="muted">使用中のタグ</div>
-    <ul id="tag-used" class="tree"></ul>
+    <details class="sec" data-sec="tags" open>
+      <summary>タグ<span class="sec-count" id="count-tags"></span></summary>
+      <input type="file" id="tag-csv" accept=".csv,text/csv" hidden>
+      <button id="tag-import-btn" type="button">タグ CSV を取り込む</button>
+      <div id="tag-import-result" class="muted"></div>
+      <input id="tag-search" type="search" placeholder="辞書を検索（全列）" autocomplete="off">
+      <ul id="tag-search-results" class="tree"></ul>
+      <div id="tag-used-head" class="muted">使用中のタグ</div>
+      <ul id="tag-used" class="tree"></ul>
+    </details>
   </aside>
+
+  <div id="left-resizer" title="ドラッグで幅を変更／ダブルクリックで既定に戻す"></div>
 
   <main id="center" class="pane">
     <div id="toolbar">
